@@ -464,6 +464,7 @@ export class AntigravityServer {
             if (!parsed.hostname) return null;
             const preferredPort = parsed.port ? Number(parsed.port) : undefined;
             if (preferredPort && (Number.isNaN(preferredPort) || preferredPort < 1 || preferredPort > 65535)) {
+                console.warn(`[Antigravity Link] Ignoring invalid preferredHost port in "${this.preferredHost}"`);
                 return { host: parsed.hostname };
             }
             return { host: parsed.hostname, port: preferredPort };

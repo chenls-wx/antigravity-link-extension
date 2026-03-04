@@ -106,7 +106,7 @@ Use the exact launch command shown in the Quick start section. Any Antigravity w
 Yes. Multiple Antigravity windows are supported as long as each one is launched with the command shown above.
 
 3) **Can I use this with VS Code Remote SSH?**
-Yes. If your phone can directly reach the remote host, set `antigravityLink.preferredHost` to the remote address (supports `host` or `host:port`) so the QR code shows that remote endpoint directly.
+Yes. If your phone can directly reach the remote host, set `antigravityLink.preferredHost` to the remote address (supports `host` or `host:port`) so the QR code shows that remote endpoint directly. If direct access is not possible, forward the remote port (VS Code Ports or SSH `-L`) and set `antigravityLink.preferredHost` to a phone-reachable forwarded address.
 
 ## Contributing
 
