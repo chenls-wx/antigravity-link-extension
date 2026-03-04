@@ -47,6 +47,7 @@
         .chat-container {
             flex: 1;
             overflow-y: auto;
+            overflow-x: hidden;
             position: relative;
             -webkit-overflow-scrolling: touch;
             padding-bottom: 20px;
@@ -73,17 +74,12 @@
         /* Top Layer: Control Chips */
         .dock-controls {
             display: flex;
+            flex-wrap: wrap;
             align-items: center;
-            gap: 8px;
+            gap: 6px;
             padding: 8px;
-            overflow-x: auto;
-            scrollbar-width: none;
             border-bottom: 1px solid hsla(0, 0%, 100%, 0.05);
             width: 100%;
-        }
-
-        .dock-controls::-webkit-scrollbar {
-            display: none;
         }
 
         .control-chip {
@@ -117,6 +113,46 @@
             color: var(--text-main);
             border-color: hsla(217, 91%, 60%, 0.3);
             background: hsla(217, 91%, 60%, 0.1);
+        }
+
+        .stop-chip {
+            border-color: rgba(239, 68, 68, 0.5);
+            background: rgba(239, 68, 68, 0.12);
+            color: #ef4444;
+        }
+        .stop-chip:active { background: rgba(239, 68, 68, 0.25); }
+
+        .task-chip {
+            border-color: rgba(245, 158, 11, 0.4);
+            background: rgba(245, 158, 11, 0.08);
+            color: #f59e0b;
+        }
+        .task-chip:active { background: rgba(245, 158, 11, 0.2); }
+
+        .walkthrough-chip {
+            border-color: rgba(139, 92, 246, 0.4);
+            background: rgba(139, 92, 246, 0.08);
+            color: #8b5cf6;
+        }
+        .walkthrough-chip:active { background: rgba(139, 92, 246, 0.2); }
+
+        .plan-chip {
+            border-color: rgba(20, 184, 166, 0.4);
+            background: rgba(20, 184, 166, 0.08);
+            color: #14b8a6;
+        }
+        .plan-chip:active { background: rgba(20, 184, 166, 0.2); }
+
+        .content-sheet-body {
+            padding: 16px;
+            max-height: 68vh;
+            overflow-y: auto;
+            font-size: 14px;
+            line-height: 1.65;
+            color: #e0e0e0;
+            white-space: pre-wrap;
+            word-break: break-word;
+            -webkit-overflow-scrolling: touch;
         }
 
         /* Bottom Layer: Input Row */
@@ -424,7 +460,7 @@
         <!-- Floating Scroll FAB -->
         <button class="fab" id="scrollToBottom">↓</button>
 
-        <!-- Top Layer: Scrapers (Mode, Model) -->
+        <!-- Top Layer: Scrapers (Mode, Model, Stop, Task, Walkthrough) -->
         <div class="dock-controls" id="nativeStatusBar">
             <div id="modeChip" class="control-chip">
                 <span class="label">MODE</span>
@@ -433,6 +469,21 @@
             <div id="modelChip" class="control-chip">
                 <span class="label">MODEL</span>
                 <span id="modelVal">...</span>
+            </div>
+            <div id="stopChip" class="control-chip stop-chip" style="display:none">
+                <span>&#9632; STOP</span>
+            </div>
+            <div id="taskChip" class="control-chip task-chip">
+                <span class="label">TASK</span>
+                <span id="taskVal">Task</span>
+            </div>
+            <div id="walkthroughChip" class="control-chip walkthrough-chip">
+                <span class="label">GUIDE</span>
+                <span id="walkthroughVal">Walkthrough</span>
+            </div>
+            <div id="planChip" class="control-chip plan-chip">
+                <span class="label">PLAN</span>
+                <span>View Plan</span>
             </div>
         </div>
 
@@ -502,6 +553,16 @@
             <!-- Options injected -->
         </div>
     </div>
+    <div id="contentSheet" class="bottom-sheet">
+        <div class="sheet-header">
+            <h3 id="contentSheetTitle" class="sheet-title">Content</h3>
+            <button id="contentSheetClose" class="sheet-close"
+                style="background:transparent; border:none; color:#fff; font-size:24px;">&times;</button>
+        </div>
+        <div id="contentSheetBody" class="content-sheet-body">
+            <!-- Content injected -->
+        </div>
+    </div>
 
     <!-- Debug Log (Hidden) -->
     <div id="debugLog"
@@ -525,10 +586,418 @@
         const loginBtn = document.getElementById('loginBtn');
 
         let userIsScrolling = false;
+        let lastSnapshotData = null; // Most-recently received snapshot for on-demand menu detection
         let ws = null;
         let pendingMessage = null; // Track message waiting for visual confirmation
         let initialScrollDone = false;
         let authToken = localStorage.getItem('ag_auth_token') || '';
+        const sendBtnOriginalIcon = sendBtn.innerHTML;
+        let suppressReconnectOnce = false;
+        let mirrorHost = null;
+        let mirrorRoot = null;
+        let mirrorStyleSignature = '';
+        const boundClickRoots = new WeakSet();
+        const TRANSPARENT_PIXEL = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==';
+        const CHAT_SURFACE_SELECTOR = '#cascade, #conversation, #chat, [data-testid="cascade-root"], [data-testid="conversation-root"], [data-testid="chat-root"], [id^="cascade"], [id*="cascade"], [id^="conversation"], [id*="conversation"], [id^="chat"], [id*="chat"]';
+        const CHAT_SURFACE = `:is(${CHAT_SURFACE_SELECTOR})`;
+
+        function normalizeInlineText(value) {
+            return String(value || '').replace(/\s+/g, ' ').trim();
+        }
+
+        function toFallbackLabel(value) {
+            const label = normalizeInlineText(value).toLowerCase();
+            if (!label) return '';
+            if (/(thumb|like|good|up)/.test(label)) return 'Up';
+            if (/(down|dislike|bad)/.test(label)) return 'Down';
+            if (/(copy|duplicate)/.test(label)) return 'Copy';
+            if (/(typescript|type script|\bts\b)/.test(label)) return 'TS';
+            if (/(retry|regenerate|refresh)/.test(label)) return 'Retry';
+            if (/(open)/.test(label)) return 'Open';
+            if (/(close)/.test(label)) return 'Close';
+            return label.split(' ').slice(0, 2).join(' ').slice(0, 12);
+        }
+
+        function applyIconFallbacks(root) {
+            if (!root) return;
+            const targets = root.querySelectorAll('button, [role="button"]');
+            targets.forEach((el) => {
+                const text = normalizeInlineText(el.innerText || el.textContent || '');
+                const aria = normalizeInlineText(el.getAttribute('aria-label') || el.getAttribute('title') || '');
+                const hasGraphicChild = !!el.querySelector('svg, img, [class*="icon"], [class*="codicon"]');
+                const looksBroken = text && /^[\u25A0-\u25FF\uFFFD\uE000-\uF8FF\s]+$/.test(text);
+                // Only replace buttons whose text is entirely PUA/codicon characters.
+                // The previous (!text && hasGraphicChild) branch incorrectly targeted clean
+                // Lucide SVG icon-only buttons (chevrons, etc.), hiding their SVG content.
+                const shouldFallback = looksBroken && !!aria;
+
+                if (!el.hasAttribute('data-ag-original-text')) {
+                    el.setAttribute('data-ag-original-text', text);
+                }
+
+                if (shouldFallback) {
+                    const shortLabel = toFallbackLabel(aria);
+                    if (shortLabel) {
+                        el.classList.add('ag-fallback-label');
+                        el.setAttribute('data-ag-fallback-label', shortLabel);
+                    }
+                } else {
+                    el.classList.remove('ag-fallback-label');
+                    el.removeAttribute('data-ag-fallback-label');
+                }
+            });
+        }
+
+        function normalizeAssetUrl(value) {
+            return String(value || '')
+                .trim()
+                .replace(/^['"]|['"]$/g, '')
+                .replace(/\\/g, '/');
+        }
+
+        function isLocalAssetUrl(value) {
+            const url = normalizeAssetUrl(value).toLowerCase();
+            if (!url) return false;
+            return (
+                url.startsWith('vscode-file://') ||
+                /^file:\/\/\/[a-z]:\//i.test(url) ||
+                /^\/[a-z]:\//i.test(url) ||
+                /^[a-z]:\//i.test(url)
+            );
+        }
+
+        function sanitizeSnapshotCss(cssText) {
+            if (!cssText) return '';
+            return String(cssText).replace(/url\(([^)]+)\)/gi, (full, rawValue) => {
+                const raw = String(rawValue || '').trim();
+                if (!isLocalAssetUrl(raw)) return full;
+                return `url("${TRANSPARENT_PIXEL}")`;
+            });
+        }
+
+        function sanitizeSnapshotHtml(htmlText) {
+            if (!htmlText) return '';
+            let out = String(htmlText);
+
+            out = out.replace(/\b(src|href)\s*=\s*(['"])([^'"]+)\2/gi, (full, attr, quote, value) => {
+                if (!isLocalAssetUrl(value)) return full;
+                return `${attr}=${quote}${TRANSPARENT_PIXEL}${quote}`;
+            });
+
+            out = out.replace(/style\s*=\s*(['"])([\s\S]*?)\1/gi, (full, quote, styleValue) => {
+                const safeStyle = sanitizeSnapshotCss(styleValue);
+                return `style=${quote}${safeStyle}${quote}`;
+            });
+
+            out = out.replace(/<style\b[^>]*>([\s\S]*?)<\/style>/gi, (full, cssBody) => {
+                return `<style>${sanitizeSnapshotCss(cssBody)}</style>`;
+            });
+
+            return out;
+        }
+
+        function buildMirrorStyles(data, bodyColor) {
+            const sourceCss = String(data.css || '');
+            // `:root` inside a Shadow DOM <style> targets the main document root, not the
+            // shadow host, so --vscode-* custom properties defined there never reach shadow
+            // children.  Remap every bare `:root` selector to `:host` so variables are
+            // declared on the shadow host and inherit normally into all shadow children.
+            const hoistedCss = sourceCss.replace(/:root\b/g, ':host');
+            const scheme = String(data.colorScheme || 'dark');
+            const fg = bodyColor || '#e0e0e0';
+            return `
+                :host {
+                    display: block;
+                    width: 100%;
+                    overflow-x: hidden;
+                    color: ${fg};
+                    background: transparent;
+                    color-scheme: ${scheme};
+                }
+
+                /* ── Tailwind preflight recovery ─────────────────────────────────────────
+                   MUST be BEFORE hoistedCss. Tailwind's preflight sets border-width:0 +
+                   border-style:solid, but that rule lives inside a CSS nesting block (& *)
+                   which has no parent context after extraction via cssText.  Browsers then
+                   default to border-width:medium (3px) + border-style:none, so .border
+                   elements (which only add border-width:1px) show no border.  By setting the
+                   baseline here (before hoistedCss), .border { border-width: 1px } that
+                   arrives later in the cascade can correctly override the 0 to 1px. */
+                :host, :host *, :host *::before, :host *::after {
+                    box-sizing: border-box;
+                    border-width: 0;
+                    border-style: solid;
+                    border-color: rgb(229, 231, 235);
+                }
+
+                ${hoistedCss}
+
+                /* ── Skeleton loading placeholders ───────────────────────────────────────
+                   Antigravity virtualises old messages out of the viewport and replaces them
+                   with sized gray boxes (class bg-gray-500/10, inline height).  In the mirror
+                   there is no viewport constraint so these placeholders create large blank
+                   scroll regions above the actual conversation.  Hide them. */
+                .bg-gray-500\\/10[style*="height"],
+                .bg-gray-500\\/15[style*="height"],
+                .bg-gray-500\\/20[style*="height"] {
+                    display: none !important;
+                }
+
+                /* ── Collapse flex layout inside the cascade ─────────────────────────────
+                   In the VS Code workbench the cascade lives in a full-viewport flex stack.
+                   .grow / .flex-1 children expand to fill the remaining screen height, and
+                   overflow-y-auto inner containers create fixed-height scroll areas.
+                   In the mobile mirror we want natural document flow — collapse all of these
+                   so no blank space is added below the actual conversation content. */
+                ${CHAT_SURFACE} .grow,
+                ${CHAT_SURFACE} .flex-1,
+                ${CHAT_SURFACE} [class~="flex-1"],
+                ${CHAT_SURFACE} [class~="grow"] {
+                    flex-grow: 0 !important;
+                    flex-shrink: 0 !important;
+                    flex-basis: auto !important;
+                }
+
+                ${CHAT_SURFACE} .h-full,
+                ${CHAT_SURFACE} .min-h-full,
+                ${CHAT_SURFACE} .min-h-screen,
+                ${CHAT_SURFACE} .h-screen {
+                    height: auto !important;
+                    min-height: 0 !important;
+                }
+
+                /* Inner overflow-y-auto scroll containers would create a fixed-height
+                   scrollable area inside the mirror; let the outer mobile scroll handle it. */
+                ${CHAT_SURFACE} .overflow-y-auto,
+                ${CHAT_SURFACE} .overflow-auto {
+                    overflow: visible !important;
+                    height: auto !important;
+                    max-height: none !important;
+                }
+
+                ${CHAT_SURFACE} {
+                    max-width: 100%;
+                }
+
+                ${CHAT_SURFACE} img,
+                ${CHAT_SURFACE} svg,
+                ${CHAT_SURFACE} video {
+                    max-width: 100%;
+                }
+
+                ${CHAT_SURFACE} pre,
+                ${CHAT_SURFACE} code,
+                ${CHAT_SURFACE} table {
+                    max-width: 100%;
+                }
+
+                ${CHAT_SURFACE} pre {
+                    overflow: auto;
+                    -webkit-overflow-scrolling: touch;
+                }
+
+                ${CHAT_SURFACE} table {
+                    display: block;
+                    overflow-x: auto;
+                }
+
+                ${CHAT_SURFACE} button,
+                ${CHAT_SURFACE} [role="button"] {
+                    touch-action: manipulation;
+                }
+
+                ${CHAT_SURFACE} button svg,
+                ${CHAT_SURFACE} [role="button"] svg {
+                    width: 1rem !important;
+                    height: 1rem !important;
+                    min-width: 1rem !important;
+                    min-height: 1rem !important;
+                    max-width: 1rem !important;
+                    max-height: 1rem !important;
+                    flex: 0 0 auto;
+                }
+
+                ${CHAT_SURFACE} button.ag-fallback-label,
+                ${CHAT_SURFACE} [role="button"].ag-fallback-label {
+                    display: inline-flex !important;
+                    align-items: center;
+                    justify-content: center;
+                    min-width: 30px;
+                    min-height: 26px;
+                    padding: 4px 8px;
+                    line-height: 1.1;
+                }
+
+                ${CHAT_SURFACE} .ag-fallback-label > * {
+                    display: none !important;
+                }
+
+                ${CHAT_SURFACE} .ag-fallback-label::after {
+                    content: attr(data-ag-fallback-label);
+                    font-size: 0.7rem;
+                    font-weight: 600;
+                    opacity: 0.95;
+                }
+
+                ${CHAT_SURFACE} button[aria-label*="good" i] svg,
+                ${CHAT_SURFACE} button[aria-label*="bad" i] svg,
+                ${CHAT_SURFACE} button[aria-label*="thumb" i] svg,
+                ${CHAT_SURFACE} [role="button"][aria-label*="good" i] svg,
+                ${CHAT_SURFACE} [role="button"][aria-label*="bad" i] svg,
+                ${CHAT_SURFACE} [role="button"][aria-label*="thumb" i] svg {
+                    width: 18px !important;
+                    height: 18px !important;
+                    min-width: 18px !important;
+                    min-height: 18px !important;
+                    max-width: 18px !important;
+                    max-height: 18px !important;
+                }
+
+                /* ── Thumb / reaction button containers ──────────────────────────────────
+                   Source CSS sometimes gives thumb buttons explicit large dimensions after
+                   a context switch.  Force them to wrap tightly around their icon so the
+                   button itself never balloons. */
+                ${CHAT_SURFACE} button[aria-label*="good" i],
+                ${CHAT_SURFACE} button[aria-label*="bad" i],
+                ${CHAT_SURFACE} button[aria-label*="thumb" i],
+                ${CHAT_SURFACE} [role="button"][aria-label*="good" i],
+                ${CHAT_SURFACE} [role="button"][aria-label*="bad" i],
+                ${CHAT_SURFACE} [role="button"][aria-label*="thumb" i] {
+                    width: auto !important;
+                    height: auto !important;
+                    min-width: 0 !important;
+                    min-height: 0 !important;
+                    padding: 4px !important;
+                    display: inline-flex !important;
+                    align-items: center !important;
+                    justify-content: center !important;
+                    flex: 0 0 auto !important;
+                }
+
+                @media (max-width: 900px) {
+                    ${CHAT_SURFACE} {
+                        font-size: 14px;
+                        line-height: 1.45;
+                    }
+
+                    ${CHAT_SURFACE} button,
+                    ${CHAT_SURFACE} [role="button"] {
+                        font-size: 12px;
+                        min-height: 28px;
+                    }
+                }
+            `;
+        }
+
+        function buildRescueStyles(data, bodyColor) {
+            const scheme = String(data.colorScheme || 'dark');
+            const fg = bodyColor || '#e0e0e0';
+            return `
+                :host {
+                    display: block;
+                    width: 100%;
+                    color: ${fg};
+                    background: transparent;
+                    color-scheme: ${scheme};
+                }
+
+                :host, :host *, :host *::before, :host *::after {
+                    box-sizing: border-box;
+                }
+
+                ${CHAT_SURFACE},
+                ${CHAT_SURFACE} * {
+                    color: ${fg} !important;
+                }
+
+                ${CHAT_SURFACE} {
+                    background: transparent !important;
+                    position: static !important;
+                    inset: auto !important;
+                    transform: none !important;
+                    width: 100% !important;
+                    max-width: 100% !important;
+                    opacity: 1 !important;
+                    visibility: visible !important;
+                    display: block !important;
+                }
+
+                ${CHAT_SURFACE} img, ${CHAT_SURFACE} svg {
+                    max-width: 100%;
+                }
+
+                ${CHAT_SURFACE} pre, ${CHAT_SURFACE} code {
+                    background-color: #1e1e1e !important;
+                    color: #d4d4d4 !important;
+                }
+
+                ${CHAT_SURFACE} button svg,
+                ${CHAT_SURFACE} [role="button"] svg {
+                    width: 1rem;
+                    height: 1rem;
+                }
+            `;
+        }
+
+        function syncMirrorThemeVars() {
+            if (!mirrorHost) return;
+            try {
+                const src = getComputedStyle(document.documentElement);
+                for (let i = 0; i < src.length; i += 1) {
+                    const name = src[i];
+                    if (name && name.startsWith('--vscode-')) {
+                        mirrorHost.style.setProperty(name, src.getPropertyValue(name));
+                    }
+                }
+            } catch { }
+        }
+
+        function hasVisibleChatSurface(root) {
+            if (!root) return false;
+            const surface = root.querySelector(CHAT_SURFACE_SELECTOR);
+            if (!surface) return false;
+            const textLen = normalizeInlineText(surface.textContent || '').length;
+            const hasContentNodes = !!surface.querySelector('[data-message-id], [data-testid*="message" i], article, p, pre, code, button');
+            return textLen > 0 || hasContentNodes;
+        }
+
+        function ensureMirrorRoot() {
+            if (!mirrorHost || !mirrorHost.isConnected) {
+                mirrorHost = document.getElementById('snapshotHost');
+                if (!mirrorHost) {
+                    chatContent.innerHTML = '';
+                    mirrorHost = document.createElement('div');
+                    mirrorHost.id = 'snapshotHost';
+                    mirrorHost.style.width = '100%';
+                    mirrorHost.style.minHeight = '1px';
+                    chatContent.appendChild(mirrorHost);
+                }
+            }
+
+            if (!mirrorHost.shadowRoot) {
+                mirrorHost.attachShadow({ mode: 'open' });
+            }
+
+            mirrorRoot = mirrorHost.shadowRoot;
+            if (!boundClickRoots.has(mirrorRoot)) {
+                mirrorRoot.addEventListener('click', forwardSnapshotClick);
+                boundClickRoots.add(mirrorRoot);
+            }
+
+            if (!mirrorRoot.getElementById('mirrorStyle')) {
+                const styleEl = document.createElement('style');
+                styleEl.id = 'mirrorStyle';
+                mirrorRoot.appendChild(styleEl);
+            }
+
+            if (!mirrorRoot.getElementById('mirrorContent')) {
+                const contentEl = document.createElement('div');
+                contentEl.id = 'mirrorContent';
+                mirrorRoot.appendChild(contentEl);
+            }
+
+            return mirrorRoot;
+        }
 
         // Check URL for token immediately (QR code login)
         const urlParams = new URLSearchParams(window.location.search);
@@ -562,7 +1031,10 @@
                 localStorage.setItem('ag_auth_token', token);
                 loginModal.classList.remove('show');
                 // Reconnect
-                if (ws) ws.close();
+                if (ws && ws.readyState !== WebSocket.CLOSED) {
+                    suppressReconnectOnce = true;
+                    ws.close(1000, 'manual_reauth');
+                }
                 connectWebSocket();
             }
         }
@@ -593,144 +1065,75 @@
             }
 
             // Apply body background and color from Antigravity
-            const bodyBg = data.bodyBg || '#1a1a1a';
-            const bodyColor = data.bodyColor || '#e0e0e0';
+            const rawBodyBg = String(data.bodyBg || '').trim();
+            const transparentBg = !rawBodyBg ||
+                rawBodyBg.toLowerCase() === 'transparent' ||
+                /rgba?\(\s*0\s*,\s*0\s*,\s*0\s*,\s*0\s*\)/i.test(rawBodyBg);
+            const bodyBg = transparentBg ? '#1a1a1a' : rawBodyBg;
+            let bodyColor = String(data.bodyColor || '').trim() || '#e0e0e0';
+            if (transparentBg && /^rgb\(\s*0\s*,\s*0\s*,\s*0\s*\)$/i.test(bodyColor)) {
+                bodyColor = '#e0e0e0';
+            }
             document.body.style.backgroundColor = bodyBg;
             document.body.style.color = bodyColor;
 
-            chatContent.innerHTML = `
-                <style>
-                    /* Apply color scheme from Antigravity */
-                    :root, html, body, #chatContent, #chatContent * {
-                        color-scheme: ${data.colorScheme || 'dark'} !important;
-                    }
-                    
-                    /* Inject all CSS from Antigravity */
-                    ${data.css}
-                    
-                    /* Reset positioning for layout, but preserve terminal rendering */
-                    #cascade *:not([class*="xterm"]):not([class*="terminal"]):not([class*="Terminal"]) {
-                        position: static !important;
-                    }
-                    #cascade { position: relative !important; }
-                    
-                    /* Terminal needs its positioning to work */
-                    [class*="xterm"], [class*="terminal"], [class*="Terminal"],
-                    [class*="xterm"] *, [class*="terminal"] *, [class*="Terminal"] * {
-                        position: revert !important;
-                    }
-                    
-                    /* Use captured text color from Antigravity (works for any theme) */
-                    #cascade, #cascade * {
-                        color: ${data.bodyColor || 'inherit'};
-                    }
-                    
-                    /* Code blocks - keep dark background */
-                    pre, code, #cascade pre, #cascade code,
-                    [class*="hljs"], [class*="shiki"] {
-                        background-color: #1e1e1e !important;
-                        color: #d4d4d4 !important;
-                    }
-                    pre code { background-color: transparent !important; }
-                    
-                    /* Hide broken vscode-file:// icons */
-                    img[src^="vscode-file://"] {
-                        display: none !important;
-                    }
-                    
-                    /* Hide elements with vscode-file:// background/mask images */
-                    [style*="vscode-file://"] {
-                        background-image: none !important;
-                        mask-image: none !important;
-                        -webkit-mask-image: none !important;
-                    }
-                    
-                    /* Ensure terminal output shows fully */
-                    [class*="terminal"], [class*="xterm"], [class*="output"],
-                    pre, .monaco-editor, [class*="editor"] {
-                        max-height: none !important;
-                        height: auto !important;
-                        overflow: visible !important;
-                    }
-                    
-                    
-                    
-                    /* Hide legacy Antigravity input container - SCOPED to injected content only */
-                    /* Target common input/composer containers */
-                    #chatContent div[class*="input-container"],
-                    #chatContent div[class*="composer"],
-                    
-                    /* Hide textareas and rich text inputs within chatContent */
-                    #chatContent textarea,
-                    #chatContent input[type="text"],
-                    #chatContent [contenteditable="true"],
-                    #chatContent [role="textbox"],
-                    
-                    /* Target by placeholder if possible (attribute or text content is harder in CSS) */
-                    
-                    #chatContent textarea[class*="composer"],
-                    #chatContent div[data-testid*="input"],
-                    #chatContent div[class*="prompt-input"],
-                    
-                    /* Hide specific icon buttons by SVG content or Aria labels */
-                    #chatContent button:has(svg[class*="lucide-mic"]),
-                    #chatContent button:has(svg[class*="lucide-send"]),
-                    #chatContent button:has(svg[class*="lucide-arrow-up"]), /* Often used for send */
-                    #chatContent button:has(svg[class*="lucide-paperclip"]),
-                    #chatContent button[aria-label="Send"],
-                    #chatContent button[aria-label*="Send"], /* Catch "Send message" etc */
-                    #chatContent button[aria-label="Attach"],
-                    #chatContent button[aria-label*="voice"],
-                    #chatContent button[aria-label*="Voice"],
-                    #chatContent button[aria-label*="mic"],
-                    
-                     /* Hide the bottom bar with icons safely by scoping to chat content */
-                    #chatContent div:has(> div[role="button"][aria-haspopup="dialog"]),
-                    #chatContent div:has(> input[type="file"]),
-                    #chatContent div.outline-solid.relative.z-20, /* Review changes container */
-                    #chatContent div:has(> div:contains("Ask anything")) {
-                        display: none !important;
-                    }
-                    
-                    /* Legacy control hiding - minimal approach */
-                    button[id^="headlessui-popover-button"],
-                    button[id^="headlessui-menu-button"] {
-                        /* Commented out for now - let legacy buttons show */
-                        /* opacity: 0 !important; pointer-events: none !important; */
-                    }
-                </style>
-                ${data.html}
-            `;
+            const root = ensureMirrorRoot();
+            const styleEl = root.getElementById('mirrorStyle');
+            const contentEl = root.getElementById('mirrorContent');
 
-            // NEW: Cleanup legacy UI elements by text content (highly robust post-processing)
-            chatContent.querySelectorAll('button, [role="button"], span, div').forEach(el => {
-                const text = (el.innerText || '').trim();
-                const blackList = [
-                    'Review Changes', 'Submit', 'Proceed', 'Relocate', 'Always run',
-                    'Thinking...', 'Thought for', 'Stop', 'Accept', 'Reject',
-                    'Ask anything', 'Planning', 'Model'
-                ];
-                if (blackList.some(b => text.startsWith(b))) {
-                    // Find the nearest logical container to hide
-                    const target = el.closest('button, [role="button"], div.outline-solid, div.isolate, div.flex-row') || el;
-                    if (target) {
-                        target.style.setProperty('display', 'none', 'important');
-                    }
+            const safeCss = sanitizeSnapshotCss(String(data.css || ''));
+            const safeHtml = sanitizeSnapshotHtml(String(data.html || ''));
+
+            const cssSig = [
+                String(data.themeClass || ''),
+                String(data.themeAttr || ''),
+                String(data.colorScheme || ''),
+                String(safeCss).length
+            ].join('|');
+
+            if (cssSig !== mirrorStyleSignature) {
+                styleEl.textContent = buildMirrorStyles({ ...data, css: safeCss }, bodyColor);
+                mirrorStyleSignature = cssSig;
+                syncMirrorThemeVars();
+            }
+
+            const themeClass = String(data.themeClass || '').trim();
+            contentEl.className = themeClass;
+            const themeAttr = String(data.themeAttr || '').trim();
+            if (themeAttr) contentEl.setAttribute('data-theme', themeAttr);
+            else contentEl.removeAttribute('data-theme');
+            contentEl.innerHTML = safeHtml;
+            applyIconFallbacks(root);
+            if (!hasVisibleChatSurface(root)) {
+                styleEl.textContent = buildRescueStyles({ ...data, css: safeCss }, bodyColor);
+                mirrorStyleSignature = `rescue|${cssSig}`;
+                applyIconFallbacks(root);
+                if (typeof logToScreen === 'function') {
+                    logToScreen('UI rescue mode enabled (source CSS hid chat surface).', '#fbbf24');
                 }
-            });
+            }
+
+            const doScrollToBottom = () => {
+                // Scroll to mirrorHost bottom rather than chatContainer.scrollHeight
+                // to avoid landing in blank space created by flex layout artifacts.
+                const target = mirrorHost
+                    ? mirrorHost.offsetTop + mirrorHost.offsetHeight + 16
+                    : chatContainer.scrollHeight;
+                chatContainer.scrollTop = Math.min(target, chatContainer.scrollHeight);
+            };
 
             if (!initialScrollDone) {
-                // Force a double-RAF scroll on first render to land at the newest content
                 initialScrollDone = true;
+                // Two-stage: first RAF lets shadow DOM mount, second measures, setTimeout
+                // handles any reflow triggered by style recalculation.
                 requestAnimationFrame(() => {
                     requestAnimationFrame(() => {
-                        chatContainer.scrollTop = chatContainer.scrollHeight;
+                        doScrollToBottom();
+                        setTimeout(doScrollToBottom, 80);
                     });
                 });
             } else if (isNearBottom || scrollPos === 0) {
-                requestAnimationFrame(() => {
-                    chatContainer.scrollTop = chatContainer.scrollHeight;
-                });
+                requestAnimationFrame(doScrollToBottom);
             } else {
                 chatContainer.scrollTop = scrollPos;
             }
@@ -791,8 +1194,9 @@
                     }
                     if (res.ok) {
                         const data = await res.json();
+                        lastSnapshotData = data;
                         renderSnapshot(data);
-                        updateControls(data.controlsHtml || data.html);
+                        updateControls(data);
                     }
                 } catch (e) {
                     logToScreen(`HTTP Poll Fail: ${e.message}`, '#f87171');
@@ -815,6 +1219,37 @@
             updateConnectionUI('connecting');
 
             ws = new WebSocket(wsUrl);
+
+            async function recoverIfStalled() {
+                try {
+                    const loader = document.querySelector('.loading span');
+                    const isStalled = !!loader && /authenticating|waiting for chat surface/i.test(loader.textContent || '');
+                    if (!isStalled) return;
+
+                    const snapshotRes = await fetch('/snapshot', {
+                        headers: { 'Authorization': `Bearer ${authToken}` }
+                    });
+                    if (snapshotRes.ok) {
+                        const data = await snapshotRes.json();
+                        lastSnapshotData = data;
+                        renderSnapshot(data);
+                        updateControls(data);
+                        return;
+                    }
+
+                    const instancesRes = await fetch('/instances', {
+                        headers: { 'Authorization': `Bearer ${authToken}` }
+                    });
+                    if (!instancesRes.ok) return;
+                    const data = await instancesRes.json();
+                    const fallbackTargetId = data.activeTargetId || (Array.isArray(data.instances) && data.instances[0] ? data.instances[0].id : '');
+                    if (fallbackTargetId) {
+                        await switchInstance(fallbackTargetId);
+                    }
+                } catch (e) {
+                    logToScreen(`Recover check failed: ${e.message}`, '#f87171');
+                }
+            }
 
             // Watchdog: If no snapshot or WS open in 5s, fall back to HTTP
             const watchdog = setTimeout(() => {
@@ -840,7 +1275,7 @@
                         const data = await res.json();
                         if (!data.activePort && data.instances.length > 0) {
                             if (loader) loader.textContent = 'Auto-connecting...';
-                            await switchInstance(data.instances[0].port);
+                            await switchInstance(data.instances[0].id);
                             return;
                         }
                     }
@@ -849,16 +1284,30 @@
                 }
 
                 ws.send(JSON.stringify({ type: 'request_snapshot' }));
+
+                // If no snapshot arrives quickly, surface actionable state instead of hanging on "Authenticating..."
+                setTimeout(() => {
+                    const loadingEl = document.querySelector('.loading span');
+                    if (loadingEl && /authenticating/i.test(loadingEl.textContent || '')) {
+                        loadingEl.textContent = 'Connected. Waiting for chat surface...';
+                    }
+                }, 5000);
+
+                // Recovery path: try pulling snapshot/instances if UI still stalled.
+                setTimeout(recoverIfStalled, 6500);
             };
 
             ws.onmessage = (event) => {
                 try {
                     const msg = JSON.parse(event.data);
                     if (msg.type === 'snapshot' && msg.data) {
+                        lastSnapshotData = msg.data;
                         if (!userIsScrolling) {
                             renderSnapshot(msg.data);
-                            updateControls(msg.data.controlsHtml || msg.data.html);
                         }
+                        // updateControls must always run (updates chips + menu detection)
+                        // even while the user is scrolling — it does not touch the mirror DOM.
+                        updateControls(msg.data);
                     }
                 } catch (e) {
                     logToScreen(`Message Parse Error: ${e.message}`, '#f87171');
@@ -869,6 +1318,11 @@
                 clearTimeout(watchdog);
                 const reason = event.code === 1008 ? 'Auth Failed' : (event.code === 1006 ? 'Abnormal Closure' : `Closed (${event.code})`);
                 logToScreen(`WS Disconnected: ${reason}`);
+
+                if (suppressReconnectOnce) {
+                    suppressReconnectOnce = false;
+                    return;
+                }
 
                 if (event.code === 1008) {
                     authToken = '';
@@ -923,6 +1377,7 @@
                 messageInput.value = '';
                 autoResizeInput(); // Reset to min-height
                 sendBtn.disabled = false;
+                sendBtn.innerHTML = sendBtnOriginalIcon;
             }
         }
 
@@ -978,49 +1433,54 @@
             logToScreen(`Uploading: ${file.name} (${(file.size / 1024 / 1024).toFixed(1)}MB)...`, '#3b82f6');
 
             try {
-                const reader = new FileReader();
-                reader.onload = async (e) => {
-                    const base64Content = e.target.result.split(',')[1]; // Remove data URL prefix
-
-                    const response = await fetch('/upload', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'Authorization': `Bearer ${authToken}`
-                        },
-                        body: JSON.stringify({
-                            name: file.name,
-                            content: base64Content,
-                            targetSelector: uploadTargetSelector || undefined
-                        })
-                    });
-
-                    if (response.ok) {
-                        const result = await response.json();
-                        logToScreen(`Upload success: ${file.name}`, '#4ade80');
-                        if (result.injected) {
-                            alert(`Uploaded and injected: ${result.path}`);
-                        } else {
-                            const reason = result.reason || 'could_not_locate_file_input';
-                            const msg = `File saved but not injected (${reason}). If you know the file input selector, enter it to retry next time.`;
-                            alert(msg);
-                            const userSelector = prompt('Optional CSS selector for the file input (e.g., input[type="file"])', uploadTargetSelector);
-                            if (userSelector) {
-                                uploadTargetSelector = userSelector.trim();
-                                localStorage.setItem('ag_upload_target', uploadTargetSelector);
-                            }
+                const base64Content = await new Promise((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = (e) => {
+                        try {
+                            const dataUrl = String(e.target.result || '');
+                            resolve(dataUrl.split(',')[1] || '');
+                        } catch (readErr) {
+                            reject(readErr);
                         }
+                    };
+                    reader.onerror = () => reject(new Error('Error reading file'));
+                    reader.readAsDataURL(file);
+                });
+
+                const response = await fetch('/upload', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${authToken}`
+                    },
+                    body: JSON.stringify({
+                        name: file.name,
+                        content: base64Content,
+                        targetSelector: uploadTargetSelector || undefined
+                    })
+                });
+
+                if (response.ok) {
+                    const result = await response.json();
+                    logToScreen(`Upload success: ${file.name}`, '#4ade80');
+                    if (result.injected) {
+                        alert(`Uploaded and injected: ${result.path}`);
                     } else {
-                        const error = await response.json().catch(() => ({ error: response.statusText }));
-                        const msg = response.status === 413 ? 'File too large for server.' : error.error;
-                        logToScreen(`Upload failed: ${msg}`, '#f87171');
-                        alert(`Upload failed: ${msg}`);
+                        const reason = result.reason || 'could_not_locate_file_input';
+                        const msg = `File saved but not injected (${reason}). If you know the file input selector, enter it to retry next time.`;
+                        alert(msg);
+                        const userSelector = prompt('Optional CSS selector for the file input (e.g., input[type="file"])', uploadTargetSelector);
+                        if (userSelector) {
+                            uploadTargetSelector = userSelector.trim();
+                            localStorage.setItem('ag_upload_target', uploadTargetSelector);
+                        }
                     }
-                };
-                reader.onerror = () => {
-                    alert('Error reading file');
-                };
-                reader.readAsDataURL(file);
+                } else {
+                    const error = await response.json().catch(() => ({ error: response.statusText }));
+                    const msg = response.status === 413 ? 'File too large for server.' : error.error;
+                    logToScreen(`Upload failed: ${msg}`, '#f87171');
+                    alert(`Upload failed: ${msg}`);
+                }
             } catch (err) {
                 console.error('Upload error:', err);
                 alert('Upload error');
@@ -1030,91 +1490,6 @@
                 fileInput.value = ''; // Reset for next upload
             }
         });
-
-        // Voice Input Logic
-        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-        if (SpeechRecognition) {
-            const recognition = new SpeechRecognition();
-            recognition.continuous = true; // Continuous listening
-            recognition.interimResults = true; // Real-time feedback
-            recognition.lang = 'en-US';
-
-            let isListening = false;
-            let baseText = '';
-
-            micBtn.addEventListener('click', () => {
-                if (isListening) {
-                    recognition.stop();
-                    return;
-                }
-
-                try {
-                    // Capture current text
-                    baseText = messageInput.value;
-                    if (baseText && !baseText.endsWith(' ') && !baseText.endsWith('\n')) baseText += ' ';
-
-                    recognition.start();
-                    isListening = true;
-                    micBtn.innerHTML = '🔴';
-                    micBtn.classList.add('listening');
-                    micBtn.style.color = '#ff4444';
-                    micBtn.style.background = '#3a3a3a';
-                    micBtn.style.boxShadow = '0 0 0 3px rgba(255, 68, 68, 0.3)';
-                } catch (e) {
-                    console.error(e);
-                }
-            });
-
-            recognition.onresult = (event) => {
-                // event.results contains the accumulator for this session
-                let sessionTranscript = '';
-                for (let i = 0; i < event.results.length; ++i) {
-                    sessionTranscript += event.results[i][0].transcript;
-                }
-
-                // Smooth real-time update
-                messageInput.value = baseText + sessionTranscript;
-
-                // Auto-resize logic so the textarea grows as we speak
-                messageInput.style.height = 'auto'; // Reset to calculate scrollHeight
-                messageInput.style.height = Math.min(messageInput.scrollHeight, 120) + 'px';
-                messageInput.scrollTop = messageInput.scrollHeight;
-                return;
-
-                // Append any new final results
-                if (currentFinal) {
-                    const current = messageInput.value;
-                    messageInput.value = (current + (current && !current.endsWith(' ') ? ' ' : '') + currentFinal).trim();
-                }
-
-                // Note: We don't display interim directly in value to avoid cursor jumping, 
-                // but enabling it makes the engine faster. 
-                // A more advanced UI would overlay interim text, but standard append is safer.
-
-                messageInput.dispatchEvent(new Event('input'));
-                messageInput.scrollTop = messageInput.scrollHeight;
-            };
-
-            recognition.onend = () => {
-                isListening = false;
-                micBtn.innerHTML = '🎙️';
-                micBtn.classList.remove('listening');
-                micBtn.style.color = '#fff';
-                micBtn.style.background = '#3a3a3a';
-                micBtn.style.boxShadow = 'none';
-            };
-
-            recognition.onerror = (event) => {
-                console.error('Speech recognition error', event.error);
-                micBtn.innerHTML = '⚠️';
-                setTimeout(() => {
-                    if (!micBtn.classList.contains('listening')) micBtn.innerHTML = '🎙️';
-                }, 2000);
-            };
-        } else {
-            micBtn.style.display = 'none';
-            console.log('Web Speech API not supported');
-        }
 
         // Instance Handling
         const instancesBtn = document.getElementById('instancesBtn');
@@ -1256,10 +1631,6 @@
             }
         }
 
-        messageInput.addEventListener('input', () => {
-            messageInput.style.height = '44px';
-        });
-
         // --- Microphone / Speech to Text Logic ---
         let recognition = null;
         let isRecording = false;
@@ -1303,7 +1674,9 @@
             };
 
             recognition.onend = () => {
-                stopRecording();
+                isRecording = false;
+                micBtn.style.background = '';
+                micBtn.style.color = '';
             };
         } else {
             micBtn.style.opacity = '0.3';
@@ -1311,10 +1684,11 @@
         }
 
         function stopRecording() {
+            const wasRecording = isRecording;
             isRecording = false;
             micBtn.style.background = '';
             micBtn.style.color = '';
-            if (recognition) recognition.stop();
+            if (recognition && wasRecording) recognition.stop();
         }
 
         micBtn.addEventListener('click', () => {
@@ -1363,36 +1737,43 @@
                 path.unshift(selector);
                 el = el.parentNode;
                 if (el instanceof ShadowRoot) {
-                    el = el.host;
+                    break;
                 }
             }
             return path.join(' > ');
         }
 
         // Click Forwarding Logic
-        chatContent.addEventListener('click', async (e) => {
+        async function forwardSnapshotClick(e) {
             if (!authToken) return;
 
-            // 1. Identify what was clicked
             let target = e.target;
+            if (!target || !(target instanceof Element)) return;
+            if (target.id === 'snapshotHost') return;
 
-            // Traverse up slightly to find interactive elements
             let interactive = target;
-            while (interactive && interactive !== chatContent) {
+            while (interactive && interactive !== chatContent && interactive.id !== 'snapshotHost') {
                 const tag = interactive.tagName.toLowerCase();
                 if (tag === 'button' || tag === 'a' || interactive.getAttribute('role') === 'button') {
                     target = interactive;
                     break;
                 }
-                interactive = interactive.parentElement;
+
+                if (interactive.parentElement) {
+                    interactive = interactive.parentElement;
+                } else {
+                    const rootNode = interactive.getRootNode ? interactive.getRootNode() : null;
+                    interactive = rootNode instanceof ShadowRoot ? rootNode.host : null;
+                }
             }
 
-            const text = target.innerText || '';
+            const text = target.getAttribute('data-ag-original-text') || target.innerText || target.textContent || '';
             const tag = target.tagName.toLowerCase();
             const selector = getUniqueSelector(target);
 
             // Ignore container clicks
             if (tag === 'div' && target.id === 'chatContent') return;
+            if (target.id === 'snapshotHost') return;
 
             console.log(`Click: "${text}" <${tag}> [${selector}]`);
 
@@ -1431,7 +1812,9 @@
             } catch (err) {
                 console.error('Network error sending click:', err);
             }
-        });
+        }
+
+        chatContent.addEventListener('click', forwardSnapshotClick);
 
         // --- Native Controls Logic ---
         const nativeStatusBar = document.getElementById('nativeStatusBar');
@@ -1439,30 +1822,125 @@
         const modelVal = document.getElementById('modelVal');
         const modeChip = document.getElementById('modeChip');
         const modelChip = document.getElementById('modelChip');
+        const stopChip = document.getElementById('stopChip');
+        const taskChip = document.getElementById('taskChip');
+        const taskVal = document.getElementById('taskVal');
+        const walkthroughChip = document.getElementById('walkthroughChip');
+        const walkthroughVal = document.getElementById('walkthroughVal');
+        const planChip = document.getElementById('planChip');
         const sheetOverlay = document.getElementById('sheetOverlay');
         const optionsSheet = document.getElementById('optionsSheet');
         const sheetList = document.getElementById('sheetList');
         const sheetTitle = document.getElementById('sheetTitle');
         const sheetClose = document.getElementById('sheetClose');
+        const contentSheet = document.getElementById('contentSheet');
+        const contentSheetTitle = document.getElementById('contentSheetTitle');
+        const contentSheetBody = document.getElementById('contentSheetBody');
+        const contentSheetClose = document.getElementById('contentSheetClose');
 
-        let lastControlsHtml = '';
+        let lastControlsSignature = '';
         let currentModeSelector = '';
         let currentModelSelector = '';
+        let currentStopSelector = '';
+        let currentTaskSelector = '';
+        let currentWalkthroughSelector = '';
         let currentModeText = '';
         let currentModelText = '';
         let pendingMenuClick = false;
+        let pendingMenuAttempts = 0;
         let lastClickedType = ''; // 'mode' or 'model'
+        let pendingContentType = ''; // 'task', 'walkthrough', or 'plan'
+        let pendingContentAttempts = 0;
+        let cachedPlanText = ''; // last detected plan content from cascade
+
+        function normalizeControlText(value) {
+            return String(value || '').replace(/\s+/g, ' ').trim();
+        }
+
+        function isCommandPaletteOption(text) {
+            const t = normalizeControlText(text).toLowerCase();
+            if (!t) return false;
+            if (/^[a-z][a-z0-9 ._-]{1,40}:\s/.test(t) && !/^(gpt|claude|gemini|llama|deepseek)\b/.test(t)) return true;
+            return (
+                t.startsWith('developer:') ||
+                t.includes('reload window') ||
+                t.includes('recently used') ||
+                t.includes('other commands') ||
+                t.includes('command palette') ||
+                t.includes('type a command') ||
+                t.includes('antigravity link: start server') ||
+                t.includes('antigravity link: stop server') ||
+                t.includes('antigravity link: show qr code') ||
+                t.includes('end demo mode')
+            );
+        }
+
+        function isModeLikeLabel(text) {
+            const t = normalizeControlText(text).toLowerCase();
+            if (!t || t.length > 48 || isCommandPaletteOption(t) || t.includes(':')) return false;
+            return (
+                t === 'fast' || t === 'planning' || t === 'agent' || t === 'ask' ||
+                t === 'chat' || t === 'code' || t === 'edit' || t === 'execution' ||
+                t === 'execute' || t === 'writing' ||
+                t === 'fast mode' || t === 'planning mode' || t === 'agent mode' ||
+                t === 'ask mode' || t === 'chat mode' || t === 'code mode' ||
+                t === 'edit mode' || t === 'execution mode' || t === 'execute mode' ||
+                t === 'writing mode'
+            );
+        }
+
+        function isModelLikeLabel(text) {
+            const t = normalizeControlText(text);
+            if (!t || t.length > 90 || isCommandPaletteOption(t)) return false;
+            return /\b(gemini|claude|gpt(?:-[\w.]+)?|sonnet|haiku|flash|pro|opus|llama|deepseek|model)\b/i.test(t);
+        }
+
+        function toSnapshotControl(ctrl) {
+            if (!ctrl || !ctrl.text) return null;
+            return {
+                text: normalizeControlText(ctrl.text),
+                selector: String(ctrl.selector || '')
+            };
+        }
+
+        function syncLegacyHider(selectors) {
+            let hiderStyle = document.getElementById('legacy-hider-style');
+            if (!hiderStyle) {
+                hiderStyle = document.createElement('style');
+                hiderStyle.id = 'legacy-hider-style';
+                document.head.appendChild(hiderStyle);
+            }
+            const safeRules = selectors
+                .filter((sel) => typeof sel === 'string' && sel.length > 0 && sel.length < 320 && !/[{}]/.test(sel))
+                .map((sel) => `#chatContent ${sel} { opacity: 0 !important; pointer-events: none !important; }`);
+            hiderStyle.textContent = safeRules.join('\n');
+        }
 
         // Reusable click sender
-        async function sendClickToServer(selector, text, type) {
+        async function sendClickToServer(selector, text, type, expectMenu = false) {
             if (!authToken) return;
-            pendingMenuClick = true;
-            lastClickedType = type || '';
+            const safeSelector = typeof selector === 'string' ? selector : '';
+            const safeText = normalizeControlText(text || '');
+            if (!safeSelector && !safeText) return;
+
+            if (expectMenu) {
+                pendingMenuClick = true;
+                pendingMenuAttempts = 0;
+                lastClickedType = type || '';
+                // The mode/model dialogs are always present in the DOM (even when visually
+                // closed), so we can detect their items immediately from the current snapshot
+                // without waiting up to 3 s for the next server poll.
+                if (lastSnapshotData) {
+                    lastControlsSignature = ''; // force re-evaluation
+                    updateControls(lastSnapshotData);
+                }
+            }
+
             try {
                 await fetch('/click', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` },
-                    body: JSON.stringify({ selector, text })
+                    body: JSON.stringify({ selector: safeSelector || undefined, text: safeText || undefined })
                 });
             } catch (err) { console.error('Error forwarding click:', err); }
         }
@@ -1472,19 +1950,20 @@
                 (lastClickedType === 'model' ? 'Select Model' : title);
             sheetTitle.textContent = displayTitle;
             sheetList.innerHTML = '';
-            // Deduplicate options by text
+
             const seen = new Set();
             const uniqueOptions = options.filter(opt => {
-                if (seen.has(opt.text)) return false;
-                seen.add(opt.text);
+                const key = normalizeControlText(opt.text).toLowerCase();
+                if (!key || seen.has(key)) return false;
+                seen.add(key);
                 return true;
             });
+
             uniqueOptions.forEach(opt => {
                 const div = document.createElement('div');
                 div.className = 'option-item';
                 div.innerHTML = `<span class="icon">●</span> ${opt.text}`;
                 div.addEventListener('click', async () => {
-                    // Optimistically update the UI for Mode selection
                     if (lastClickedType === 'mode') {
                         modeVal.textContent = opt.text;
                         currentModeText = opt.text;
@@ -1493,10 +1972,8 @@
                         currentModelText = opt.text;
                     }
 
-                    await sendClickToServer(opt.selector, opt.text, lastClickedType);
+                    await sendClickToServer(opt.selector, opt.text, lastClickedType, false);
                     hideSheet();
-
-                    // Request a fresh snapshot to confirm the change
                     setTimeout(() => {
                         if (ws && ws.readyState === WebSocket.OPEN) {
                             ws.send(JSON.stringify({ type: 'request_snapshot' }));
@@ -1515,164 +1992,396 @@
         function hideSheet() {
             sheetOverlay.classList.remove('show');
             optionsSheet.classList.remove('show');
-            setTimeout(() => { sheetOverlay.style.display = 'none'; }, 300);
+            if (!contentSheet.classList.contains('show')) {
+                setTimeout(() => { sheetOverlay.style.display = 'none'; }, 300);
+            }
             pendingMenuClick = false;
+            pendingMenuAttempts = 0;
         }
 
-        if (sheetClose) sheetClose.addEventListener('click', hideSheet);
-        if (sheetOverlay) sheetOverlay.addEventListener('click', hideSheet);
-        if (modeChip) modeChip.addEventListener('click', () => { if (currentModeSelector) sendClickToServer(currentModeSelector, currentModeText, 'mode'); });
-        if (modelChip) modelChip.addEventListener('click', () => { if (currentModelSelector) sendClickToServer(currentModelSelector, currentModelText, 'model'); });
+        function showContentSheet(title, html) {
+            contentSheetTitle.textContent = title;
+            contentSheetBody.innerHTML = html;
+            sheetOverlay.style.display = 'block';
+            setTimeout(() => {
+                sheetOverlay.classList.add('show');
+                contentSheet.classList.add('show');
+            }, 10);
+        }
 
-        // ============================================================================
-        // NATIVE CONTROLS SYSTEM
-        // ============================================================================
-        // This system captures the desktop VS Code UI state and reimplements key
-        // controls in a mobile-first way. Currently implemented: Mode & Model selectors.
-        //
-        // ARCHITECTURE:
-        // 1. Server captures TWO HTML snapshots:
-        //    - `html`: Clean #cascade only (for rendering chat)
-        //    - `controlsHtml`: Full document.body (for scraping button state)
-        // 2. Client calls updateControls(controlsHtml) to extract button data
-        // 3. Native mobile UI (Status Bar, Bottom Sheet) displays the options
-        // 4. Clicks are forwarded to desktop via POST /click
-        //
-        // TODO: MOBILE-FIRST REIMPLEMENTATION OF FILTERED FEATURES
-        // ============================================================================
-        //
-        // The following VS Code features are currently FILTERED OUT (not visible in
-        // mobile view) but should be reimplemented in a mobile-first way:
-        //
-        // TODO: [P1] Changes Overview Button
-        //   - Desktop: Shows pending file changes, accept/reject buttons
-        //   - Mobile Strategy:
-        //     * Add FAB (Floating Action Button) with badge count (e.g., "3 changes")
-        //     * Tap opens full-screen modal with swipeable cards (one per file)
-        //     * Each card shows diff preview + Accept/Reject buttons
-        //     * Use native mobile gestures (swipe to accept/reject)
-        //   - Implementation:
-        //     1. Scrape `controlsHtml` for buttons matching "Accept", "Reject", "changes"
-        //     2. Extract file paths and diff data from surrounding DOM
-        //     3. Create mobile UI in #chatContent overlay
-        //     4. Forward accept/reject clicks via POST /click
-        //
-        // TODO: [P1] Terminal Access
-        //   - Desktop: Embedded terminal with full command history
-        //   - Mobile Strategy:
-        //     * Add "Terminal" button to native Status Bar
-        //     * Tap opens bottom sheet with terminal output (read-only view)
-        //     * "Run Command" button opens input modal for new commands
-        //     * Use monospace font, syntax highlighting for output
-        //   - Implementation:
-        //     1. Server already captures terminal buffer in CAPTURE_SCRIPT (xterm logic)
-        //     2. Extract terminal content from `controlsHtml` (.xterm, .terminal-wrapper)
-        //     3. Render in mobile-optimized view (scrollable, copy-friendly)
-        //     4. For input: scrape terminal input selector, forward via POST /click or /send
-        //
-        // TODO: [P2] Artifacts Panel
-        //   - Desktop: Side panel showing generated files, images, diagrams
-        //   - Mobile Strategy:
-        //     * Add "Artifacts" chip to native Status Bar (with count badge)
-        //     * Tap opens carousel view (swipe between artifacts)
-        //     * Each artifact shows preview + "Open in Editor" / "Download" buttons
-        //     * Images/videos render natively, code shows syntax-highlighted preview
-        //   - Implementation:
-        //     1. Scrape `controlsHtml` for artifact containers ([class*="artifact"])
-        //     2. Extract artifact metadata (type, name, content)
-        //     3. Build carousel UI with native mobile controls
-        //     4. For "Open" action: forward click to desktop button
-        //
-        // TODO: [P2] Review Changes (Code Review Mode)
-        //   - Desktop: Inline diff view with comment threads
-        //   - Mobile Strategy:
-        //     * Similar to Changes Overview, but focused on review workflow
-        //     * Full-screen diff view with "Previous/Next" navigation
-        //     * Tap line to add comment (opens keyboard with comment input)
-        //     * "Approve" / "Request Changes" buttons at bottom
-        //   - Implementation:
-        //     1. Scrape `controlsHtml` for review UI elements
-        //     2. Extract diff hunks, existing comments, review state
-        //     3. Build mobile review UI with gesture navigation
-        //     4. Forward approve/comment actions via POST /click
-        //
-        // GENERAL PATTERN FOR NEW FEATURES:
-        // 1. Identify desktop button/panel in `controlsHtml` via querySelector
-        // 2. Extract state/data from surrounding DOM
-        // 3. Design mobile-first UI (FAB, Bottom Sheet, Modal, Carousel)
-        // 4. Forward user actions to desktop via POST /click with precise selectors
-        // 5. Use `pendingMenuClick` pattern to force immediate UI updates
-        // ============================================================================
+        function hideContentSheet() {
+            sheetOverlay.classList.remove('show');
+            contentSheet.classList.remove('show');
+            if (!optionsSheet.classList.contains('show')) {
+                setTimeout(() => { sheetOverlay.style.display = 'none'; }, 300);
+            }
+            pendingContentType = '';
+        }
 
-        function updateControls(html) {
-            // Force update if we are expecting a menu click, or if HTML changed
-            if (html === lastControlsHtml && !pendingMenuClick) return;
-            lastControlsHtml = html;
+        // Returns prose-like text from an element, or null if it looks like CSS/code noise.
+        function extractProse(el) {
+            const raw = (el.textContent || '').replace(/\s+/g, ' ').trim();
+            if (raw.length < 60) return null;
+            // Filter: require >55% alphabetic + space characters (CSS class lists fail this)
+            const alpha = (raw.match(/[a-zA-Z ]/g) || []).length;
+            if (alpha / raw.length < 0.55) return null;
+            return raw;
+        }
+
+        function renderContentText(text) {
+            const esc = text
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;');
+            // Split on blank lines, give each paragraph its own <p>; bold leading numbers
+            const paras = esc.split(/\n{2,}/).map(p => p.trim()).filter(Boolean);
+            const html = paras.map(p => {
+                const lined = p.split(/\n/).map(l => l.trim()).filter(Boolean)
+                    .map(l => l.replace(/^(\d+\.\s+)/, '<strong>$1</strong>'))
+                    .join('<br>');
+                return `<p style="margin:0 0 10px">${lined}</p>`;
+            }).join('');
+            return `<div style="line-height:1.7;word-break:break-word">${html}</div>`;
+        }
+
+        function renderMarkdown(text) {
+            if (!text) return '';
+            const lines = text.split('\n');
+            let html = '';
+            let listType = '';
+            const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            const inline = (s) => esc(s)
+                .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+                .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+                .replace(/`([^`]+)`/g, '<code style="background:rgba(255,255,255,0.1);padding:1px 4px;border-radius:3px;font-size:12px">$1</code>');
+            const closeList = () => { if (listType) { html += listType === 'ul' ? '</ul>' : '</ol>'; listType = ''; } };
+            for (const rawLine of lines) {
+                const line = rawLine.trimEnd();
+                if (!line.trim()) { closeList(); html += '<br>'; continue; }
+                if (/^#{1,6}\s/.test(line)) {
+                    closeList();
+                    const level = line.match(/^(#+)/)[1].length;
+                    const sz = Math.max(13, 18 - level * 2);
+                    html += `<h${Math.min(level + 2, 6)} style="margin:12px 0 4px;font-size:${sz}px;line-height:1.3">${inline(line.replace(/^#+\s/, ''))}</h${Math.min(level + 2, 6)}>`;
+                } else if (/^\s*[-*+]\s/.test(line)) {
+                    if (listType !== 'ul') { closeList(); html += '<ul style="margin:4px 0;padding-left:20px;list-style:disc">'; listType = 'ul'; }
+                    html += `<li style="margin:2px 0">${inline(line.replace(/^\s*[-*+]\s/, ''))}</li>`;
+                } else if (/^\s*\d+\.\s/.test(line)) {
+                    if (listType !== 'ol') { closeList(); html += '<ol style="margin:4px 0;padding-left:20px">'; listType = 'ol'; }
+                    html += `<li style="margin:2px 0">${inline(line.replace(/^\s*\d+\.\s/, ''))}</li>`;
+                } else if (/^---+$/.test(line.trim())) {
+                    closeList(); html += '<hr style="border:none;border-top:1px solid rgba(255,255,255,0.15);margin:8px 0">';
+                } else {
+                    closeList();
+                    html += `<p style="margin:0 0 6px">${inline(line)}</p>`;
+                }
+            }
+            closeList();
+            return `<div style="line-height:1.65;word-break:break-word;font-size:13px">${html}</div>`;
+        }
+
+        function extractContentFromSnapshot(snapshot, type) {
+            // Use full body HTML — task/walkthrough panels often open outside the cascade
+            const html = String(snapshot.controlsHtml || snapshot.html || '');
+            if (!html) return null;
             const temp = document.createElement('div');
             temp.innerHTML = html;
 
-            // 1. Gather all potential buttons
-            const allBtns = Array.from(temp.querySelectorAll('button, [role="button"], [class*="button"]'));
+            // Strip noise elements that never hold readable prose
+            ['script', 'style', 'noscript', 'svg', 'canvas', 'template'].forEach(tag => {
+                temp.querySelectorAll(tag).forEach(el => el.remove());
+            });
 
-            // 2. Scan for Mode and Model buttons based on DOM structure
-            // Discovery-based detection (more robust than tag-only)
-            const modeBtn = allBtns.find(btn => {
-                const text = (btn.innerText || btn.textContent || '').trim();
-                // Exact matches for current mode labels
-                if (text === 'Planning' || text === 'Fast' || text === 'Agent') {
-                    // Ensure it's not the model button which might also contain these words in some contexts
-                    // Mode buttons typically have no ID or a very generic one, whereas Model buttons often have headlessui IDs
-                    return !btn.id || !btn.id.includes('headlessui');
+            const typePat = type === 'task' ? /\btask\b/i
+                : type === 'walkthrough' ? /\bwalkthrough\b/i
+                : /\b(?:plan|implementation)\b/i;
+
+            // Priority 1: dialogs/modals/regions with the type word in their label or content
+            for (const el of Array.from(temp.querySelectorAll(
+                '[role="dialog"],[aria-modal="true"],[role="alertdialog"],[role="region"][aria-label]'
+            ))) {
+                const label = (el.getAttribute('aria-label') || el.getAttribute('aria-labelledby') || '').toLowerCase();
+                const t = extractProse(el);
+                if (t && (typePat.test(label) || typePat.test(t.substring(0, 500)))) {
+                    return renderContentText(t);
                 }
-                return false;
+            }
+
+            // Priority 2: headings that name the type → grab their containing section
+            for (const h of Array.from(temp.querySelectorAll('h1,h2,h3,h4,h5,h6'))) {
+                if (typePat.test(h.textContent || '')) {
+                    const section = h.closest('section,article,[role="article"]') || h.parentElement;
+                    if (section) {
+                        const t = extractProse(section);
+                        if (t) return renderContentText(t);
+                    }
+                }
+            }
+
+            // Priority 3: large prose blocks mentioning the type anywhere in first 300 chars
+            const seen = new WeakSet();
+            const blocks = [];
+            for (const el of Array.from(temp.querySelectorAll('p,li,article,section'))) {
+                if (seen.has(el)) continue;
+                const t = extractProse(el);
+                if (t && typePat.test(t.substring(0, 300)) && t.length > 100) {
+                    // Include ancestors to avoid duplicate smaller fragments
+                    let cur = el;
+                    while (cur) { seen.add(cur); cur = cur.parentElement; }
+                    blocks.push(t);
+                }
+            }
+            if (blocks.length === 0) return null;
+            blocks.sort((a, b) => b.length - a.length);
+            return renderContentText(blocks[0]);
+        }
+
+        // Detect implementation-plan content from cascade snapshot HTML (client-side).
+        // Returns the plan text if found, or empty string.
+        function detectPlanContent(snapshot) {
+            const html = String(snapshot.html || '');
+            if (!html) return '';
+            const temp = document.createElement('div');
+            temp.innerHTML = html;
+            ['script', 'style', 'noscript', 'svg'].forEach(tag => {
+                temp.querySelectorAll(tag).forEach(el => el.remove());
+            });
+            const planPat = /\b(?:implementation\s+plan|impl(?:ementation)?\s+plan)\b/i;
+
+            // Priority 1: headings/strong/b with "implementation plan"
+            for (const h of Array.from(temp.querySelectorAll('h1,h2,h3,h4,h5,h6,strong,b'))) {
+                if (planPat.test(h.textContent || '')) {
+                    const section = h.closest(
+                        'section,article,[role="article"],[class*="message"],[class*="block"],[class*="card"]'
+                    ) || h.parentElement;
+                    if (section) {
+                        const t = extractProse(section);
+                        if (t && t.length > 80) return t;
+                    }
+                }
+            }
+
+            // Priority 2: links whose text mentions "plan"
+            for (const a of Array.from(temp.querySelectorAll('a'))) {
+                if (planPat.test(a.textContent || '')) {
+                    const article = a.closest('[role="article"],[class*="message"],article,section') || a.parentElement;
+                    if (article) {
+                        const t = extractProse(article);
+                        if (t && t.length > 40) return t;
+                    }
+                }
+            }
+
+            // Priority 3: any paragraph/div mentioning "implementation plan" in first 300 chars
+            for (const el of Array.from(temp.querySelectorAll('p,li,div'))) {
+                const txt = el.textContent || '';
+                if (planPat.test(txt.substring(0, 300)) && txt.length > 60) {
+                    const article = el.closest('[role="article"],[class*="message"],article,section') || el.parentElement;
+                    const t = article ? extractProse(article) : extractProse(el);
+                    if (t && t.length > 40) return t;
+                }
+            }
+
+            return '';
+        }
+
+        if (sheetClose) sheetClose.addEventListener('click', hideSheet);
+        if (contentSheetClose) contentSheetClose.addEventListener('click', hideContentSheet);
+        if (sheetOverlay) sheetOverlay.addEventListener('click', () => { hideSheet(); hideContentSheet(); });
+
+        if (modeChip) modeChip.addEventListener('click', () => { if (currentModeSelector) sendClickToServer(currentModeSelector, currentModeText, 'mode', true); });
+        if (modelChip) modelChip.addEventListener('click', () => { if (currentModelSelector) sendClickToServer(currentModelSelector, currentModelText, 'model', true); });
+
+        if (stopChip) stopChip.addEventListener('click', () => {
+            if (currentStopSelector) sendClickToServer(currentStopSelector, '', 'stop', false);
+        });
+
+        if (taskChip) taskChip.addEventListener('click', async () => {
+            showContentSheet('Task', '<p style="color:#999;font-style:italic">Loading task\u2026</p>');
+            try {
+                const res = await fetch(`/task?token=${encodeURIComponent(authToken)}`);
+                if (res.ok) {
+                    const data = await res.json();
+                    showContentSheet('Task', renderMarkdown(data.content));
+                } else {
+                    const err = await res.json().catch(() => ({}));
+                    const hint = err.searched ? `<br><small style="opacity:0.5">Searched: ${err.searched}</small>` : '';
+                    showContentSheet('Task', `<p style="color:#f87171">Task file not found on server.${hint}</p>`);
+                }
+            } catch (err) {
+                showContentSheet('Task', `<p style="color:#f87171">Error: ${String(err)}</p>`);
+            }
+        });
+
+        if (walkthroughChip) walkthroughChip.addEventListener('click', async () => {
+            showContentSheet('Walkthrough', '<p style="color:#999;font-style:italic">Loading walkthrough\u2026</p>');
+            try {
+                const res = await fetch(`/walkthrough?token=${encodeURIComponent(authToken)}`);
+                if (res.ok) {
+                    const data = await res.json();
+                    showContentSheet('Walkthrough', renderMarkdown(data.content));
+                } else {
+                    const err = await res.json().catch(() => ({}));
+                    const hint = err.searched ? `<br><small style="opacity:0.5">Searched: ${err.searched}</small>` : '';
+                    showContentSheet('Walkthrough', `<p style="color:#f87171">Walkthrough file not found on server.${hint}</p>`);
+                }
+            } catch (err) {
+                showContentSheet('Walkthrough', `<p style="color:#f87171">Error: ${String(err)}</p>`);
+            }
+        });
+
+        if (planChip) planChip.addEventListener('click', async () => {
+            showContentSheet('Implementation Plan', '<p style="color:#999;font-style:italic">Loading plan\u2026</p>');
+            try {
+                const res = await fetch(`/plan?token=${encodeURIComponent(authToken)}`);
+                if (res.ok) {
+                    const data = await res.json();
+                    showContentSheet('Implementation Plan', renderMarkdown(data.content));
+                    return;
+                }
+            } catch { }
+            // Fall back to in-page detection
+            const inPage = cachedPlanText ? renderContentText(cachedPlanText) : '';
+            showContentSheet('Implementation Plan',
+                inPage || '<p style="color:#f87171">No implementation plan found — the AI may not have generated one yet.</p>');
+        });
+
+        function updateControls(snapshot) {
+            if (!snapshot) return;
+            const controlsHtml = String(snapshot.controlsHtml || snapshot.html || '');
+            const controlsMeta = snapshot.controlsMeta || null;
+            const surfaceSignals = snapshot.surfaceSignals || null;
+
+            const signature = JSON.stringify({
+                modeText: controlsMeta && controlsMeta.mode ? normalizeControlText(controlsMeta.mode.text) : '',
+                modeSelector: controlsMeta && controlsMeta.mode ? String(controlsMeta.mode.selector || '') : '',
+                modelText: controlsMeta && controlsMeta.model ? normalizeControlText(controlsMeta.model.text) : '',
+                modelSelector: controlsMeta && controlsMeta.model ? String(controlsMeta.model.selector || '') : '',
+                scope: controlsMeta ? String(controlsMeta.scope || '') : '',
+                hasCommandPalette: !!(surfaceSignals && surfaceSignals.hasCommandPalette),
+                hasComposer: !!(surfaceSignals && surfaceSignals.hasComposer),
+                hasMessages: !!(surfaceSignals && surfaceSignals.hasMessages),
+                controlsLen: controlsHtml.length,
+                hasStop: !!(controlsMeta && controlsMeta.stop),
+                hasTask: !!(controlsMeta && controlsMeta.task),
+                hasWalkthrough: !!(controlsMeta && controlsMeta.walkthrough)
             });
 
-            const modelBtn = allBtns.find(btn => {
-                if (btn === modeBtn) return false;
-                const id = btn.id || '';
-                const text = (btn.innerText || btn.textContent || '').trim();
-                // Model button usually has a headlessui ID and contains model-like keywords
-                const isModelId = id.includes('headlessui-popover-button') || id.includes('headlessui-menu-button');
-                const hasModelText = text.includes('Gemini') || text.includes('Claude') || text.includes('Pro') || text.includes('Sonnet') || text.includes('gpt');
+            if (signature === lastControlsSignature && !pendingMenuClick) return;
+            lastControlsSignature = signature;
 
-                return isModelId && hasModelText;
-            });
+            const temp = document.createElement('div');
+            temp.innerHTML = controlsHtml;
 
-            // 4. Update UI & Hide Legacy Buttons
-            let hideSelectors = [];
+            let modeControl = null;
+            let modelControl = null;
+            const hideSelectors = [];
 
-            if (modeBtn) {
-                const text = (modeBtn.innerText || modeBtn.textContent || '').trim();
-                modeVal.textContent = text;
+            const modeFromMeta = toSnapshotControl(controlsMeta && controlsMeta.mode);
+            const modelFromMeta = toSnapshotControl(controlsMeta && controlsMeta.model);
+            const surfaceHasCascade = !!(surfaceSignals && surfaceSignals.hasCascade);
+            const surfaceHasMessages = !!(surfaceSignals && surfaceSignals.hasMessages);
+            const surfaceHasCommandPalette = !!(surfaceSignals && surfaceSignals.hasCommandPalette);
+
+            if (!modeFromMeta && !modelFromMeta && surfaceHasCommandPalette && !surfaceHasCascade && !surfaceHasMessages) {
+                modeVal.textContent = '...';
+                modeVal.style.color = '#999';
+                currentModeSelector = '';
+                currentModeText = '';
+                modelVal.textContent = '...';
+                modelVal.style.color = '#999';
+                currentModelSelector = '';
+                currentModelText = '';
+                syncLegacyHider([]);
+                pendingMenuClick = false;
+                pendingMenuAttempts = 0;
+                return;
+            }
+
+            if (modeFromMeta && isModeLikeLabel(modeFromMeta.text)) {
+                modeControl = modeFromMeta;
+                if (modeFromMeta.selector) hideSelectors.push(modeFromMeta.selector);
+            }
+            if (modelFromMeta && isModelLikeLabel(modelFromMeta.text)) {
+                modelControl = modelFromMeta;
+                if (modelFromMeta.selector) hideSelectors.push(modelFromMeta.selector);
+            }
+
+            if (!modeControl || !modelControl) {
+                const scopeRoot = temp.querySelector('#cascade, #conversation, #chat, [data-testid="cascade-root"], [data-testid="conversation-root"], [data-testid="chat-root"]') || temp;
+                const allBtns = Array.from(scopeRoot.querySelectorAll('button, [role="button"], [class*="button"]'));
+                const candidates = allBtns
+                    .map((btn) => ({
+                        text: normalizeControlText(btn.innerText || btn.textContent || '')
+                    }))
+                    .filter((entry) => entry.text && entry.text.length <= 96 && !isCommandPaletteOption(entry.text));
+
+                if (!modeControl) {
+                    const foundMode = candidates.find((entry) => isModeLikeLabel(entry.text) && !isModelLikeLabel(entry.text));
+                    if (foundMode) modeControl = { text: foundMode.text, selector: '' };
+                }
+
+                if (!modelControl) {
+                    const foundModel = candidates.find((entry) => (!modeControl || entry.text !== modeControl.text) && isModelLikeLabel(entry.text));
+                    if (foundModel) modelControl = { text: foundModel.text, selector: '' };
+                }
+            }
+
+            nativeStatusBar.style.display = 'flex';
+            if (modeControl) {
+                modeVal.textContent = modeControl.text;
                 modeVal.style.color = '#3b82f6';
-                currentModeSelector = getUniqueSelector(modeBtn);
-                currentModeText = text;
-                nativeStatusBar.style.display = 'flex';
-                hideSelectors.push(currentModeSelector);
+                currentModeSelector = modeControl.selector || '';
+                currentModeText = modeControl.text;
+            } else {
+                modeVal.textContent = '...';
+                modeVal.style.color = '#999';
+                currentModeSelector = '';
+                currentModeText = '';
             }
 
-            if (modelBtn) {
-                const text = (modelBtn.innerText || modelBtn.textContent || '').trim();
-                modelVal.textContent = text;
-                currentModelSelector = getUniqueSelector(modelBtn);
-                currentModelText = text;
-                nativeStatusBar.style.display = 'flex';
-                hideSelectors.push(currentModelSelector);
+            if (modelControl) {
+                modelVal.textContent = modelControl.text;
+                modelVal.style.color = '#e0e0e0';
+                currentModelSelector = modelControl.selector || '';
+                currentModelText = modelControl.text;
+            } else {
+                modelVal.textContent = '...';
+                modelVal.style.color = '#999';
+                currentModelSelector = '';
+                currentModelText = '';
+            }
+            syncLegacyHider([]);
+
+            // ── Stop chip ─────────────────────────────────────────────────────────────
+            const stopData = controlsMeta && controlsMeta.stop ? controlsMeta.stop : null;
+            currentStopSelector = stopData ? String(stopData.selector || '') : '';
+            if (stopChip) stopChip.style.display = currentStopSelector ? '' : 'none';
+
+            // Task / Walkthrough chips are always visible — content comes from server files,
+            // not from the IDE DOM (see /task and /walkthrough endpoints).
+
+            // ── Update content sheet if waiting for task/walkthrough content ──────────
+            if (pendingContentType && contentSheet && contentSheet.classList.contains('show')) {
+                pendingContentAttempts += 1;
+                const extracted = extractContentFromSnapshot(snapshot, pendingContentType);
+                if (extracted && extracted.length > 40) {
+                    contentSheetBody.innerHTML = extracted;
+                    pendingContentType = '';
+                    pendingContentAttempts = 0;
+                } else if (pendingContentAttempts >= 6) {
+                    // Give up after ~18 s (6 × 3 s poll) rather than hanging forever
+                    contentSheetBody.innerHTML = '<p style="color:#f87171;font-style:italic">Content not found in snapshot \u2014 it may have opened in a different view in the IDE.</p>';
+                    pendingContentType = '';
+                    pendingContentAttempts = 0;
+                }
             }
 
-            // Sync legacy hider style
-            let hiderStyle = document.getElementById('legacy-hider-style');
-            if (!hiderStyle) {
-                hiderStyle = document.createElement('style');
-                hiderStyle.id = 'legacy-hider-style';
-                document.head.appendChild(hiderStyle);
-            }
-            if (hideSelectors.length > 0) {
-                hiderStyle.textContent = hideSelectors.map(sel => `${sel} { opacity: 0 !important; pointer-events: none !important; }`).join('\n');
-            }
+            // ── Implementation plan chip — cache in-page content for click handler ───
+            cachedPlanText = detectPlanContent(snapshot);
 
-            // 3. Detect Open Panels (Popovers & Menus)
             if (!pendingMenuClick) return;
+            pendingMenuAttempts += 1;
 
             const panelSelectors = [
                 '[id^="headlessui-popover-panel"]',
@@ -1680,64 +2389,94 @@
                 '[id^="headlessui-listbox-options"]',
                 '[role="menu"]',
                 '[role="listbox"]',
-                '[role="dialog"]',  // ← Mode menu uses this!
+                '[role="dialog"]',
+                '[aria-modal="true"]',
+                '[data-headlessui-state]',
+                '[id*="radix"]',
                 '[class*="popover"]',
                 '[class*="menu"]',
-                '.fixed',
-                '.absolute'
+                '[class*="listbox"]',
+                '[class*="dropdown"]'
             ];
-
-            let bestPanel = null;
             let bestItems = [];
+            let bestIsTyped = false; // true when bestItems came from isModeLikeLabel/isModelLikeLabel filter
+            const normalizeItemText = (item) => {
+                let text = normalizeControlText(item.innerText || item.textContent || '');
+                const medium = item.querySelector('.font-medium');
+                if (medium) text = normalizeControlText(medium.textContent || text);
+                return text;
+            };
+            const collectItems = (rootEl) => {
+                const itemSels = ['button', '[role="menuitem"]', '[role="option"]', 'li', '.cursor-pointer', 'a', 'div.cursor-pointer', '[class*="menu-item"]', '[class*="option"]'];
+                const seen = new Set();
+                return Array.from(rootEl.querySelectorAll(itemSels.join(', ')))
+                    .map((item) => ({ text: normalizeItemText(item), selector: '' }))
+                    .filter((it) => {
+                        if (!it.text || it.text.length > 110 || isCommandPaletteOption(it.text)) return false;
+                        const key = it.text.toLowerCase();
+                        if (seen.has(key)) return false;
+                        seen.add(key);
+                        return true;
+                    });
+            };
 
-            for (const sel of panelSelectors) {
-                const panels = Array.from(temp.querySelectorAll(sel));
-                for (const p of panels) {
-                    // Skip tiny or obviously wrong things
-                    if (p.textContent.trim().length < 2) continue;
+            for (const panel of Array.from(temp.querySelectorAll(panelSelectors.join(', ')))) {
+                const panelText = normalizeControlText(panel.textContent || '');
+                const panelHints = normalizeControlText([
+                    panel.id || '',
+                    panel.getAttribute('aria-label') || '',
+                    String(panel.className || '')
+                ].join(' ')).toLowerCase();
+                if (panelText.length < 2) continue;
+                if (panelHints.includes('quick-input') || panelHints.includes('quickpick') || panelHints.includes('command palette')) continue;
+                if (isCommandPaletteOption(panelText)) continue;
 
-                    const itemSels = [
-                        'button',
-                        '[role="menuitem"]',
-                        '[role="option"]',
-                        'li',
-                        '.cursor-pointer',  // ← Mode menu items have this class!
-                        'a',
-                        'div.cursor-pointer'  // ← Explicitly add div with cursor-pointer
-                    ];
-                    const foundItems = Array.from(p.querySelectorAll(itemSels.join(', ')))
-                        .map(item => {
-                            let text = (item.innerText || item.textContent || '').replace(/\s+/g, ' ').trim();
-                            // For Mode menu, extract just the title (first line)
-                            if (item.querySelector('.font-medium')) {
-                                text = item.querySelector('.font-medium').textContent.trim();
-                            }
-                            return { text, selector: getUniqueSelector(item) };
-                        })
-                        .filter(it => it.text.length > 0 && it.text.length < 100);
+                const foundItems = collectItems(panel);
 
-                    // Heuristic Filter: If we are looking for a specific type, ensure at least one item matches
-                    let matchesType = true;
-                    if (lastClickedType === 'mode') {
-                        const modeWords = ['Planning', 'Fast', 'Agent', 'Ask', 'Execution', 'Edit', 'Chat', 'Writing'];
-                        matchesType = foundItems.some(it => modeWords.some(w => it.text.includes(w)));
-                    } else if (lastClickedType === 'model') {
-                        const modelWords = ['Gemini', 'Claude', 'gpt', 'Sonnet', 'Pro', 'Flash', 'Haiku', 'Llama'];
-                        matchesType = foundItems.some(it => modelWords.some(w => it.text.toLowerCase().includes(w.toLowerCase())));
-                    }
-
-                    if (matchesType && foundItems.length > bestItems.length) {
-                        bestItems = foundItems;
-                        bestPanel = p;
-                    }
+                let typedItems = foundItems;
+                let panelIsTyped = false;
+                if (lastClickedType === 'mode') {
+                    const strict = foundItems.filter((it) => isModeLikeLabel(it.text));
+                    if (strict.length > 0) { typedItems = strict; panelIsTyped = true; }
+                    else if (foundItems.length >= 2) typedItems = foundItems.slice(0, 12);
+                } else if (lastClickedType === 'model') {
+                    const strict = foundItems.filter((it) => isModelLikeLabel(it.text));
+                    if (strict.length > 0) { typedItems = strict; panelIsTyped = true; }
+                    else if (foundItems.length >= 2) typedItems = foundItems.slice(0, 12);
                 }
+                // A semantically-typed match always beats an untyped fallback match,
+                // regardless of item count.  Within the same tier, prefer more items.
+                const beats = (panelIsTyped && !bestIsTyped) ||
+                    (panelIsTyped === bestIsTyped && typedItems.length > bestItems.length);
+                if (beats) { bestItems = typedItems; bestIsTyped = panelIsTyped; }
             }
 
-            if (bestPanel && bestItems.length > 0) {
+            if (bestItems.length === 0) {
+                const globalItems = collectItems(temp);
+                let typedItems = globalItems;
+                if (lastClickedType === 'mode') {
+                    typedItems = globalItems.filter((it) => isModeLikeLabel(it.text) || /\b(fast|planning|agent|ask|chat|code|edit|execution|execute|writing)\b/i.test(it.text));
+                } else if (lastClickedType === 'model') {
+                    typedItems = globalItems.filter((it) => isModelLikeLabel(it.text) || /\b(gemini|claude|gpt|sonnet|haiku|flash|pro|opus|llama|deepseek)\b/i.test(it.text));
+                }
+                if ((lastClickedType === 'mode' || lastClickedType === 'model') && typedItems.length === 0 && globalItems.length >= 2) {
+                    typedItems = globalItems.slice(0, 12);
+                }
+                bestItems = typedItems;
+            }
+
+            if (bestItems.length > 0) {
                 if (!optionsSheet.classList.contains('show')) {
                     showSheet('Select Option', bestItems);
                     pendingMenuClick = false;
+                    pendingMenuAttempts = 0;
                 }
+            } else if (pendingMenuAttempts >= 3) {
+                if (typeof logToScreen === 'function') {
+                    logToScreen(`No options found for ${lastClickedType || 'menu'} after ${pendingMenuAttempts} snapshots`, '#fbbf24');
+                }
+                pendingMenuClick = false;
+                pendingMenuAttempts = 0;
             }
         }
 

@@ -5,32 +5,193 @@ import util from 'util';
 // Scripts
 const CAPTURE_SCRIPT = `(() => {
     try {
-        const containerSelectors = [
+        const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+        const commandPalettePattern = /(developer:\\s|reload window|recently used|other commands|command palette|show qr code|start server|stop server|end demo mode)/i;
+        const modePattern = /^(fast|planning|agent|ask|chat|code|edit|execution|execute|writing)(?:\\s+mode)?$/i;
+        const modelPattern = /\\b(gemini|claude|gpt(?:-[\\w.]+)?|sonnet|haiku|flash|pro|opus|llama|deepseek|model)\\b/i;
+        const esc = (s) => {
+            try {
+                return (window.CSS && CSS.escape) ? CSS.escape(String(s)) : String(s).replace(/["\\\\]/g, '\\\\$&');
+            } catch {
+                return String(s);
+            }
+        };
+
+        const toSelector = (el) => {
+            if (!el || !el.tagName) return '';
+            if (el.id) return '#' + esc(el.id);
+            const testId = el.getAttribute && el.getAttribute('data-testid');
+            if (testId) return el.tagName.toLowerCase() + '[data-testid="' + esc(testId) + '"]';
+            const aria = el.getAttribute && el.getAttribute('aria-label');
+            if (aria) return el.tagName.toLowerCase() + '[aria-label="' + esc(aria) + '"]';
+            const parts = [];
+            let cur = el;
+            let depth = 0;
+            while (cur && cur.nodeType === Node.ELEMENT_NODE && depth < 6) {
+                let seg = cur.tagName.toLowerCase();
+                if (cur.id) {
+                    seg += '#' + esc(cur.id);
+                    parts.unshift(seg);
+                    break;
+                }
+                let nth = 1;
+                let sib = cur;
+                while ((sib = sib.previousElementSibling)) {
+                    if (sib.tagName === cur.tagName) nth += 1;
+                }
+                seg += ':nth-of-type(' + nth + ')';
+                parts.unshift(seg);
+                cur = cur.parentElement;
+                depth += 1;
+            }
+            return parts.join(' > ');
+        };
+
+        const collectControls = (root) => {
+            const controlsRoot = root || document.body;
+            const allButtons = Array.from(controlsRoot.querySelectorAll('button, [role="button"]'));
+            const filtered = allButtons
+                .map((el) => ({
+                    el,
+                    text: normalizeText(el.innerText || el.textContent || '')
+                }))
+                .filter((item) =>
+                    item.text &&
+                    item.text.length <= 96 &&
+                    !commandPalettePattern.test(item.text)
+                );
+
+            const mode = filtered.find((item) =>
+                modePattern.test(item.text) && !modelPattern.test(item.text)
+            ) || null;
+
+            const model = filtered.find((item) =>
+                item !== mode && modelPattern.test(item.text)
+            ) || null;
+
+            // Stop/Task/Walkthrough are searched in document.body, not just the cascade,
+            // because they may live in a toolbar or composer outside the cascade element.
+            const allBodyButtons = Array.from(document.body.querySelectorAll('button, [role="button"]'));
+
+            // Detect stop-generation button — may be icon-only so search by aria-label.
+            // Use word-boundary on aria-label to catch "Stop", "Stop generation", etc.
+            const stopEl = allBodyButtons.find((el) => {
+                const aria = normalizeText(el.getAttribute('aria-label') || '');
+                if (aria) return /\bstop\b/i.test(aria);
+                const text = normalizeText(el.innerText || el.textContent || '');
+                return /^stop(?: generat\w*)?$/i.test(text);
+            }) || null;
+
+            // Detect Task / Walkthrough buttons by visible text or aria-label.
+            // Also query [role="tab"] and <a> in case they're rendered as non-button elements.
+            const allBodyClickable = Array.from(document.body.querySelectorAll(
+                'button, [role="button"], [role="tab"], a[href]'
+            ));
+
+            const taskPat = /^tasks?$/i;
+            const taskEl = allBodyClickable.find((el) => {
+                const text = normalizeText(el.innerText || el.textContent || '');
+                const aria = normalizeText(el.getAttribute('aria-label') || '');
+                return taskPat.test(text) || taskPat.test(aria);
+            }) || null;
+
+            const walkthroughPat = /^walkthrough$/i;
+            const walkthroughEl = allBodyClickable.find((el) => {
+                const text = normalizeText(el.innerText || el.textContent || '');
+                const aria = normalizeText(el.getAttribute('aria-label') || '');
+                return walkthroughPat.test(text) || walkthroughPat.test(aria);
+            }) || null;
+
+            return {
+                scope: /^(cascade|conversation|chat)$/i.test(String(controlsRoot.id || ''))
+                    ? String(controlsRoot.id || '').toLowerCase()
+                    : (controlsRoot === document.body ? 'document' : (controlsRoot.tagName || 'unknown').toLowerCase()),
+                mode: mode ? { text: mode.text, selector: toSelector(mode.el) } : null,
+                model: model ? { text: model.text, selector: toSelector(model.el) } : null,
+                stop: stopEl ? { selector: toSelector(stopEl) } : null,
+                task: taskEl ? { text: normalizeText(taskEl.innerText || taskEl.textContent || 'Task'), selector: toSelector(taskEl) } : null,
+                walkthrough: walkthroughEl ? { text: normalizeText(walkthroughEl.innerText || walkthroughEl.textContent || 'Walkthrough'), selector: toSelector(walkthroughEl) } : null
+            };
+        };
+
+        const candidateSelectors = [
             '#cascade',
-            '.titlebar.cascade-panel-open',
-            '.cascade-bar',
-            '[id="workbench.parts.titlebar"]'
+            '#conversation',
+            '#chat',
+            '[data-testid="cascade-root"]',
+            '[data-testid="conversation-root"]',
+            '[data-testid="chat-root"]',
+            'main [id^="cascade"]',
+            'main [id*="cascade"]',
+            'main [id^="conversation"]',
+            'main [id*="conversation"]',
+            'main [id^="chat"]',
+            'main [id*="chat"]'
         ];
-        
-        let cascade;
-        for (const sel of containerSelectors) {
-            cascade = document.querySelector(sel);
-            if (cascade) break;
+
+        const candidates = [];
+        for (const sel of candidateSelectors) {
+            try {
+                for (const el of Array.from(document.querySelectorAll(sel))) {
+                    if (!el || !el.tagName) continue;
+                    candidates.push(el);
+                }
+            } catch { }
         }
-        
-        let cleanHtml;
+
+        const uniqueCandidates = Array.from(new Set(candidates));
+        const ranked = uniqueCandidates
+            .map((el) => {
+                const id = (el.id || '').toLowerCase();
+                const className = String(el.className || '').toLowerCase();
+                const text = normalizeText(el.textContent || '');
+                const hasComposer = !!el.querySelector('[data-lexical-editor="true"][contenteditable="true"], [contenteditable="true"][role="textbox"], textarea');
+                const hasMessageLike = !!el.querySelector('[data-message-id], [data-testid*="message" i], [class*="message"], article, [role="article"]');
+                let score = 0;
+                if (id === 'cascade') score += 60;
+                if (id === 'conversation') score += 60;
+                if (id === 'chat') score += 56;
+                if (id.includes('cascade')) score += 20;
+                if (id.includes('conversation')) score += 20;
+                if (id.includes('chat')) score += 12;
+                if (className.includes('cascade')) score += 8;
+                if (className.includes('conversation')) score += 8;
+                if (className.includes('chat')) score += 6;
+                if (hasComposer) score += 20;
+                if (hasMessageLike) score += 14;
+                if (text.length > 1200) score += 8;
+                if (text.length > 400) score += 4;
+                if (className.includes('titlebar')) score -= 50;
+                if (className.includes('quick-input') || className.includes('command')) score -= 25;
+                return { el, score };
+            })
+            .sort((a, b) => b.score - a.score);
+
+        const cascade = ranked.length > 0 && ranked[0].score > 0 ? ranked[0].el : null;
+        const controlsRoot = cascade || document.body;
+        const fullBodyHtml = document.body.outerHTML;
+
+        const surfaceSignals = {
+            hasCascade: !!cascade,
+            hasComposer: !!controlsRoot.querySelector('[data-lexical-editor="true"][contenteditable="true"], [contenteditable="true"][role="textbox"], textarea'),
+            hasMessages: !!controlsRoot.querySelector('[data-message-id], [data-testid*="message" i], [class*="message"], article, [role="article"]'),
+            hasCommandPalette: !!document.querySelector('.quick-input-widget, [id*="quickInput" i], [aria-label*="Type a command" i]'),
+            hasQuickPick: !!document.querySelector('.quick-input-widget, [class*="quick-input" i], [class*="quickpick" i]'),
+            locationHref: String(location.href || '')
+        };
+
+        let cleanHtml = fullBodyHtml;
         if (cascade) {
             const clone = cascade.cloneNode(true);
-            const input = clone.querySelector('[contenteditable="true"]')?.closest('div[id^="cascade"] > div');
-            if (input) input.remove();
+            const composer = clone.querySelector('[data-lexical-editor="true"][contenteditable="true"], [contenteditable="true"][role="textbox"]');
+            if (composer) {
+                const removable = composer.closest('form, [class*="composer"], [id*="input"], [id*="composer"]')
+                    || composer.closest('div[id^="cascade"] > div, div[id^="conversation"] > div, div[id^="chat"] > div');
+                if (removable && removable !== clone) removable.remove();
+            }
             cleanHtml = clone.outerHTML;
-        } else {
-            cleanHtml = document.body.outerHTML;
         }
-        
-        // FAST MODE: Just use outerHTML. Shadow DOM support temporarily disabled to fix mobile hang.
-        const fullBodyHtml = document.body.outerHTML;
-        
+
         let allCSS = '';
         for (const sheet of document.styleSheets) {
             try {
@@ -46,6 +207,8 @@ const CAPTURE_SCRIPT = `(() => {
         return {
             html: cleanHtml,
             controlsHtml: fullBodyHtml,
+            controlsMeta: collectControls(cascade || document.body),
+            surfaceSignals,
             css: allCSS,
             backgroundColor: bodyStyles.backgroundColor,
             color: bodyStyles.color,
@@ -158,7 +321,6 @@ async function captureSnapshotInternal(cdp: CDPConnection): Promise<SnapshotDebu
                     } : undefined
                 };
                 errors.push(`ctx ${ctx.id}: ${formatException(exceptionDetails)}`);
-                contexts.push(ctxDiag);
                 continue;
             }
 
@@ -167,14 +329,12 @@ async function captureSnapshotInternal(cdp: CDPConnection): Promise<SnapshotDebu
                 if (snapshot.error) {
                     ctxDiag.error = stringifyValue(snapshot.error);
                     errors.push(`ctx ${ctx.id}: ${stringifyValue(snapshot.error)}`);
-                    contexts.push(ctxDiag);
                     continue;
                 }
 
                 // Convert vscode-file:// icons to base64 in both HTML and CSS
                 snapshot.html = convertVsCodeIcons(snapshot.html);
                 snapshot.css = convertVsCodeIcons(snapshot.css);
-                contexts.push(ctxDiag);
                 return { snapshot, errors, contexts };
             }
 

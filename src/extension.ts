@@ -50,10 +50,16 @@ async function startServer(context: vscode.ExtensionContext) {
     const config = vscode.workspace.getConfiguration('antigravityLink');
     const port = config.get<number>('port', 3000);
     const useHttps = config.get<boolean>('useHttps', true);
+    const preferredHost = config.get<string>('preferredHost', '').trim();
+    const strictWorkbenchOnly = config.get<boolean>('strictWorkbenchOnly', true);
+    const includeFallbackTargets = config.get<boolean>('includeFallbackTargets', false);
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 
+    process.env.AG_STRICT_WORKBENCH_ONLY = strictWorkbenchOnly ? 'true' : 'false';
+    process.env.AG_INCLUDE_FALLBACK_TARGETS = includeFallbackTargets ? 'true' : 'false';
+
     // Start the server
-    const newServer = new AntigravityServer(port, context.extensionPath, workspaceRoot, useHttps);
+    const newServer = new AntigravityServer(port, context.extensionPath, workspaceRoot, useHttps, preferredHost);
 
     try {
         const urls = await newServer.start();
@@ -163,6 +169,7 @@ function updateStatusBar(running: boolean, port?: number) {
     if (running) {
         statusBarItem.text = `$(broadcast) Link: ${port}`;
         statusBarItem.tooltip = "Antigravity Link Server Running - Click to Show QR";
+        statusBarItem.command = "antigravity-link.showQR";
         statusBarItem.show();
     } else {
         statusBarItem.text = `$(broadcast) Link: Off`;

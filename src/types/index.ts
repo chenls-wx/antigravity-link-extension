@@ -52,6 +52,19 @@ export interface InjectResult {
 export interface Snapshot {
     html: string;
     controlsHtml?: string;
+    controlsMeta?: {
+        scope?: string;
+        mode?: { text?: string; selector?: string } | null;
+        model?: { text?: string; selector?: string } | null;
+    };
+    surfaceSignals?: {
+        hasCascade?: boolean;
+        hasComposer?: boolean;
+        hasMessages?: boolean;
+        hasCommandPalette?: boolean;
+        hasQuickPick?: boolean;
+        locationHref?: string;
+    };
     css: string;
     backgroundColor: string;
     color: string;

@@ -1,5 +1,47 @@
 # Changelog
 
+## 1.0.12
+
+### Mobile Rendering and Layout
+
+- Fixed theme variable scoping in the mirror (`:root` remapped to `:host`) so `--vscode-*` colors/icons render correctly inside Shadow DOM.
+- Fixed Tailwind border baseline ordering so `.border` styles are no longer suppressed.
+- Fixed oversized reaction controls by constraining thumb/good-bad button containers after context switches.
+- Fixed icon-only SVG button fallback behavior so valid Lucide buttons are not replaced by text labels.
+- Improved mirror layout by collapsing VS Code full-viewport flex stacks that caused large blank areas on mobile.
+- Added placeholder suppression for virtualized message skeleton rows that produced empty scroll gaps.
+- Fixed horizontal overflow in the mobile mirror while preserving code-block horizontal scrolling.
+- Updated chip-row layout to wrap cleanly on narrow screens.
+- Improved auto-scroll targeting to follow real mirror content height instead of blank flex space.
+
+### Mode/Model Control Reliability
+
+- Fixed mode/model chip update timing by reusing the latest snapshot immediately after click-forward events.
+- Ensured mode/model chip metadata updates even while the user is scrolling.
+- Improved menu panel selection so semantic mode/model matches always win over generic fallback panels.
+
+### New Chips and Content Sheets
+
+- Added `Stop` chip integration (when available from controls metadata) to trigger IDE stop-generation actions.
+- Added persistent `Task`, `Walkthrough`, and `Plan` chips in the dock.
+- Added a reusable bottom content sheet with title/body/close controls for rendered text content.
+- Added markdown rendering for headings, lists, emphasis, inline code, and horizontal rules.
+- Added snapshot-based prose extraction for task/walkthrough fallback content.
+- Broadened in-snapshot plan detection and added cached fallback behavior.
+- Improved 404 diagnostics for task/walkthrough retrieval with searched brain-directory paths.
+
+### Server and Data Endpoints
+
+- Added brain-file discovery sorted by most-recently-modified UUID workspace directories.
+- Added `GET /task` endpoint for `task.md.resolved`.
+- Added `GET /walkthrough` endpoint for `walkthrough.md.resolved`.
+- Added `GET /plan` endpoint with ordered fallback lookup across resolved and non-resolved plan filenames.
+
+### Asset Conversion and Icon Path Fixes
+
+- Fixed local asset path regex matching for multi-character Windows path segments to stop unresolved icon fetches.
+- Added normalization for `/C:/...` style Windows paths from VS Code icon URLs before file lookup.
+
 ## 1.0.11
 
 - Fix: Resolved `SyntaxError` in snapshot capture script affecting connection.

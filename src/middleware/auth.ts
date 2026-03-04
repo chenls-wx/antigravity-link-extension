@@ -1,13 +1,12 @@
 import { Request, Response, NextFunction } from 'express';
 
 export const authMiddleware = (token: string) => (req: Request, res: Response, next: NextFunction) => {
-    // Allow static assets, main page, and diagnostic routes
+    // Allow static assets and bootstrap routes
     if (req.path === '/' ||
         req.path === '/index.html' ||
         req.path === '/ping' ||
         req.path === '/sys' ||
-        req.path.match(/\.(js|css|ico|png|json)$/) ||
-        req.path.startsWith('/debug')) {
+        req.path.match(/\.(js|css|ico|png|json)$/)) {
         return next();
     }
 

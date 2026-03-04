@@ -68,6 +68,9 @@ Replace `<username>` with your Windows username. Multiple Antigravity sessions a
 | `antigravityLink.port` | `3000` | Port for the local bridge server. |
 | `antigravityLink.autoStart` | `false` | Start the server on VS Code launch. |
 | `antigravityLink.useHttps` | `true` | Serve over HTTPS for mic access. |
+| `antigravityLink.preferredHost` | `""` | Optional LAN IPv4 to advertise in QR URL (example: `192.168.1.101`). |
+| `antigravityLink.strictWorkbenchOnly` | `true` | Only bind to `workbench.html` CDP targets for stability. |
+| `antigravityLink.includeFallbackTargets` | `false` | Allow jetski/launchpad fallback targets when strict mode is disabled. |
 
 ## Standalone vs workspace assets
 

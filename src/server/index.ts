@@ -8,7 +8,7 @@ import selfsigned from 'selfsigned';
 import { WebSocketServer, WebSocket } from 'ws';
 import { discoverInstances, connectCDP } from '../services/cdp';
 import { injectFile, injectMessage, captureSnapshot, captureSnapshotDebug, clickElement } from '../services/antigravity';
-import { CDPConnection, Snapshot } from '../types';
+import { CDPConnection, Snapshot, CDPInfo } from '../types';
 import { authMiddleware } from '../middleware/auth';
 import { securityMiddleware } from '../middleware/security';
 
@@ -30,6 +30,9 @@ interface State {
     snapshotCache: Map<number, Snapshot>;
     wssRef: WebSocketServer | null;
     pollInterval: NodeJS.Timeout | null;
+    missedSnapshots: number;
+    reinitInProgress: boolean;
+    lastCdpInitAttemptAt: number;
 }
 
 export class AntigravityServer {
@@ -41,15 +44,17 @@ export class AntigravityServer {
     private extensionPath: string;
     private port: number;
     private useHttps: boolean;
+    private preferredHost: string;
     private _localUrl = '';
     private _secureUrl = '';
     private authToken: string;
     private state: State;
     private useAuth: boolean;
 
-    constructor(port: number, extensionPath: string, workspaceRoot?: string, useHttps = true) {
+    constructor(port: number, extensionPath: string, workspaceRoot?: string, useHttps = true, preferredHost = '') {
         this.port = port;
         this.useHttps = useHttps;
+        this.preferredHost = preferredHost.trim();
         this.extensionPath = extensionPath;
         this.app = express();
         // Prefer workspace root uploads/public (matches npm run dev), fall back to extension path
@@ -66,7 +71,10 @@ export class AntigravityServer {
             activeTargetId: null,
             snapshotCache: new Map(),
             wssRef: null,
-            pollInterval: null
+            pollInterval: null,
+            missedSnapshots: 0,
+            reinitInProgress: false,
+            lastCdpInitAttemptAt: 0
         };
         this.useAuth = true;
         this.authToken = this.loadOrCreateToken(extensionPath);
@@ -98,7 +106,16 @@ export class AntigravityServer {
     private configureMiddleware() {
         this.app.use(express.json({ limit: `${MAX_UPLOAD_SIZE_MB}mb` }));
         this.app.use(express.urlencoded({ limit: `${MAX_UPLOAD_SIZE_MB}mb`, extended: true }));
-        this.app.use(express.static(this.publicDir));
+        this.app.use(express.static(this.publicDir, {
+            etag: false,
+            lastModified: false,
+            maxAge: 0,
+            setHeaders: (res) => {
+                res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+                res.setHeader('Pragma', 'no-cache');
+                res.setHeader('Expires', '0');
+            }
+        }));
         if (this.useAuth) {
             this.app.use(authMiddleware(this.authToken));
         }
@@ -115,9 +132,10 @@ export class AntigravityServer {
         if (title.includes('launchpad')) score += 2; // lower priority than chat
         if (title.includes('antigravity')) score += 2;
         if (title.includes('auth.ts')) score -= 6;
-        if (title.includes('qr')) score -= 6;
         if (url.includes('devtools') || title.includes('visual studio code')) score -= 8;
         if (title.includes('vscode-webview')) score -= 8;
+        if (url.includes('/chat') || url.includes('/assistant')) score += 4;
+        if (url.includes('workbench.html')) score += 5;
         return score;
     }
 
@@ -134,11 +152,114 @@ export class AntigravityServer {
     private isChatTarget(target: { title?: string; url?: string }): boolean {
         const title = (target.title || '').toLowerCase();
         const url = (target.url || '').toLowerCase();
-        if (title.includes('qr')) return false;
         if (title.includes('devtools') || url.includes('devtools')) return false;
         if (title.includes('vscode-webview')) return false;
         if (title.includes('auth.ts')) return false;
         return this.isWorkbenchTarget(target);
+    }
+
+    private isSnapshotUsable(snapshot: Snapshot): boolean {
+        const html = String(snapshot?.html || '');
+        if (!html || html.length < 64) return false;
+
+        const controlsMeta: any = (snapshot as any).controlsMeta || {};
+        const surfaceSignals: any = (snapshot as any).surfaceSignals || {};
+        const modeText = String(controlsMeta?.mode?.text || '').trim();
+        const modelText = String(controlsMeta?.model?.text || '').trim();
+        const hasControlMeta = !!(modeText || modelText);
+
+        const hasCascade = !!surfaceSignals.hasCascade || /id\s*=\s*["'](?:cascade|conversation|chat)["']/i.test(html);
+        const hasComposer = !!surfaceSignals.hasComposer ||
+            /contenteditable\s*=\s*["']true["']/i.test(html) ||
+            /data-lexical-editor/i.test(html) ||
+            /role\s*=\s*["']textbox["']/i.test(html);
+        const hasMessages = !!surfaceSignals.hasMessages ||
+            /data-message-id|role\s*=\s*["']article["']|class\s*=\s*["'][^"']*message/i.test(html);
+
+        const commandPaletteSignals =
+            /developer:\s|reload window|recently used|other commands|command palette|type a command/i.test(html) ||
+            !!surfaceSignals.hasCommandPalette;
+
+        if (commandPaletteSignals && !hasCascade && !hasComposer && !hasMessages && !hasControlMeta) {
+            return false;
+        }
+
+        return hasCascade || hasComposer || hasMessages || hasControlMeta;
+    }
+
+    private async probeCandidateForChat(candidate: CDPInfo): Promise<{ ok: boolean; score: number; reason: string; connection?: CDPConnection }> {
+        const probeExpression = `(() => {
+            const q = (s) => document.querySelector(s);
+            const hasCascade = !!q('#cascade, #conversation, #chat, [id*="cascade"], [id*="conversation"], [id*="chat"]');
+            const hasComposer = !!q('[data-lexical-editor="true"][contenteditable="true"], [contenteditable="true"][role="textbox"], textarea');
+            const hasMessages = !!q('[data-message-id], [data-testid*="message" i], [class*="message"], article, [role="article"]');
+            const hasCommandPalette = !!q('.quick-input-widget, [id*="quickInput" i], [aria-label*="Type a command" i]');
+            return { hasCascade, hasComposer, hasMessages, hasCommandPalette, title: String(document.title || ''), href: String(location.href || '') };
+        })()`;
+
+        try {
+            const conn = await connectCDP(candidate.url, candidate.id, candidate.title);
+            const ctxIds = conn.contexts.map(c => c.id);
+            let bestScore = -999;
+            let bestDiag: any = null;
+            let hadResult = false;
+
+            for (const ctxId of ctxIds) {
+                try {
+                    const result = await conn.call("Runtime.evaluate", {
+                        expression: probeExpression,
+                        returnByValue: true,
+                        contextId: ctxId
+                    });
+                    const value = result?.result?.value;
+                    if (!value) continue;
+                    hadResult = true;
+                    const score =
+                        (value.hasCascade ? 6 : 0) +
+                        (value.hasComposer ? 7 : 0) +
+                        (value.hasMessages ? 5 : 0) +
+                        (value.hasCommandPalette ? -5 : 0);
+                    if (score > bestScore) {
+                        bestScore = score;
+                        bestDiag = value;
+                    }
+                } catch { }
+            }
+
+            if (!hadResult) {
+                try {
+                    const result = await conn.call("Runtime.evaluate", {
+                        expression: probeExpression,
+                        returnByValue: true
+                    });
+                    const value = result?.result?.value;
+                    if (value) {
+                        const score =
+                            (value.hasCascade ? 6 : 0) +
+                            (value.hasComposer ? 7 : 0) +
+                            (value.hasMessages ? 5 : 0) +
+                            (value.hasCommandPalette ? -5 : 0);
+                        bestScore = score;
+                        bestDiag = value;
+                        hadResult = true;
+                    }
+                } catch { }
+            }
+
+            const titleScore = this.scoreTarget(candidate);
+            const finalScore = (hadResult ? bestScore : -10) + titleScore;
+            const isPaletteOnly = !!bestDiag?.hasCommandPalette && !bestDiag?.hasCascade && !bestDiag?.hasComposer && !bestDiag?.hasMessages;
+            const ok = finalScore >= 4 && !isPaletteOnly;
+            const reason = ok ? 'chat_surface' : (isPaletteOnly ? 'command_palette_surface' : 'weak_chat_signal');
+            console.log(`[TRACE] cdp.probe ${JSON.stringify({ id: candidate.id, title: candidate.title, score: finalScore, reason, diag: bestDiag || null })}`);
+            if (!ok) {
+                try { conn.ws.close(); } catch { }
+                return { ok: false, score: finalScore, reason };
+            }
+            return { ok: true, score: finalScore, reason, connection: conn };
+        } catch (error) {
+            return { ok: false, score: -999, reason: (error as Error)?.message || 'connect_failed' };
+        }
     }
 
     private async initCDP(targetId?: string): Promise<void> {
@@ -158,27 +279,77 @@ export class AntigravityServer {
         this.state.activeTargetId = null;
         this.state.activePort = null;
 
-        if (!chosen) return;
+        // User explicitly selected a target: honor it first and keep it if it connects.
+        if (targetId && chosen) {
+            try {
+                const conn = await connectCDP(chosen.url, chosen.id, chosen.title);
+                this.state.cdpConnections.push(conn);
+                this.state.activePort = chosen.port;
+                this.state.activeTargetId = chosen.id;
+                await this.updateSnapshot();
+                return;
+            } catch {
+                // fall through to probing fallback candidates
+            }
+        }
 
         const prioritized = [...instances].sort((a, b) => this.scoreTarget(b) - this.scoreTarget(a));
-        // Try chosen first, then fall back to others if connect fails
-        const candidates = [chosen, ...prioritized.filter(t => t.id !== chosen!.id)];
+        const candidates = chosen ? [chosen, ...prioritized.filter(t => t.id !== chosen!.id)] : prioritized;
+        if (candidates.length === 0) return;
+
+        let selectedConn: CDPConnection | null = null;
+        let selectedTarget: CDPInfo | null = null;
+        let fallbackConn: CDPConnection | null = null;
+        let fallbackTarget: CDPInfo | null = null;
 
         for (const candidate of candidates) {
-            try {
-                const conn = await connectCDP(candidate.url, candidate.id, candidate.title);
-                this.state.cdpConnections.push(conn);
-                this.state.activePort = candidate.port;
-                this.state.activeTargetId = candidate.id;
+            const probe = await this.probeCandidateForChat(candidate);
+            if (probe.ok && probe.connection) {
+                selectedConn = probe.connection;
+                selectedTarget = candidate;
                 break;
-            } catch { }
+            }
+
+            if (!fallbackConn) {
+                try {
+                    fallbackConn = await connectCDP(candidate.url, candidate.id, candidate.title);
+                    fallbackTarget = candidate;
+                } catch { }
+            }
+        }
+
+        if (!selectedConn && fallbackConn && fallbackTarget) {
+            selectedConn = fallbackConn;
+            selectedTarget = fallbackTarget;
+            console.log(`[TRACE] cdp.fallback_target ${JSON.stringify({ id: fallbackTarget.id, title: fallbackTarget.title })}`);
+        }
+
+        if (selectedConn && selectedTarget) {
+            this.state.cdpConnections.push(selectedConn);
+            this.state.activePort = selectedTarget.port;
+            this.state.activeTargetId = selectedTarget.id;
         }
 
         await this.updateSnapshot();
     }
 
     private async updateSnapshot(): Promise<boolean> {
-        if (this.state.cdpConnections.length === 0) return false;
+        if (this.state.cdpConnections.length === 0) {
+            const now = Date.now();
+            if (!this.state.reinitInProgress && (now - this.state.lastCdpInitAttemptAt > 2000)) {
+                this.state.reinitInProgress = true;
+                this.state.lastCdpInitAttemptAt = now;
+                console.log('[TRACE] cdp.reconnect attempting init from empty-connection state');
+                try {
+                    await this.initCDP();
+                } catch (err) {
+                    console.log('[TRACE] cdp.reconnect failed:', (err as Error).message);
+                } finally {
+                    this.state.reinitInProgress = false;
+                }
+            }
+            return false;
+        }
 
         // Only capture from active target (first/only connection)
         const cdp = this.state.activeTargetId
@@ -188,20 +359,41 @@ export class AntigravityServer {
         try {
             const snapshot = await captureSnapshot(cdp);
             if (snapshot && !snapshot.error) {
+                if (!this.isSnapshotUsable(snapshot)) {
+                    console.log('[TRACE] snapshot.rejected unusable surface');
+                    this.state.missedSnapshots += 1;
+                    return false;
+                }
                 const hash = this.hashString(snapshot.html);
                 if (hash !== this.state.lastSnapshotHash) {
                     this.state.lastSnapshot = snapshot;
                     this.state.lastSnapshotHash = hash;
+                    this.state.missedSnapshots = 0;
                     if (this.state.activePort) this.state.snapshotCache.set(this.state.activePort, snapshot);
                     this.broadcastSnapshot(snapshot);
                     return true;
                 }
+                this.state.missedSnapshots = 0;
                 return false;
             } else if (snapshot && snapshot.error) {
                 console.error(`⚠️ Capture Error (${cdp.title}):`, snapshot.error);
             }
         } catch (err) {
             console.error('Snapshot error:', (err as Error).message);
+        }
+
+        this.state.missedSnapshots += 1;
+        if (this.state.missedSnapshots >= 3 && !this.state.reinitInProgress) {
+            this.state.reinitInProgress = true;
+            console.log('[TRACE] snapshot.missed_reinit attempting CDP rebind');
+            try {
+                await this.initCDP();
+            } catch (err) {
+                console.log('[TRACE] snapshot.missed_reinit failed:', (err as Error).message);
+            } finally {
+                this.state.reinitInProgress = false;
+                this.state.missedSnapshots = 0;
+            }
         }
         return false;
     }
@@ -230,6 +422,62 @@ export class AntigravityServer {
         return hash.toString();
     }
 
+    private isPrivateIPv4(ip: string): boolean {
+        if (!ip || !/^\d+\.\d+\.\d+\.\d+$/.test(ip)) return false;
+        const parts = ip.split('.').map(n => Number(n));
+        if (parts.length !== 4 || parts.some(n => Number.isNaN(n) || n < 0 || n > 255)) return false;
+        if (parts[0] === 10) return true;
+        if (parts[0] === 192 && parts[1] === 168) return true;
+        if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return true;
+        return false;
+    }
+
+    private pickBestLocalIp(interfaces: NodeJS.Dict<os.NetworkInterfaceInfo[]>): string {
+        if (this.preferredHost && this.isPrivateIPv4(this.preferredHost)) return this.preferredHost;
+
+        const candidates: { name: string; addr: string }[] = [];
+        for (const name of Object.keys(interfaces)) {
+            for (const iface of interfaces[name] || []) {
+                if (!iface.internal && iface.family === 'IPv4') {
+                    candidates.push({ name, addr: iface.address });
+                }
+            }
+        }
+        if (candidates.length === 0) return 'localhost';
+
+        const scored = candidates.map(c => {
+            const lname = c.name.toLowerCase();
+            let score = 0;
+            if (this.isPrivateIPv4(c.addr)) score += 20;
+            if (c.addr.startsWith('192.168.')) score += 8;
+            if (lname.includes('wi-fi') || lname.includes('wireless')) score += 5;
+            if (lname.includes('ethernet') || /^en\d+$/i.test(c.name) || /^eth\d+$/i.test(c.name)) score += 4;
+            if (lname.includes('virtual') || lname.includes('vbox') || lname.includes('wsl') || lname.includes('vpn') || lname.includes('tailscale')) score -= 15;
+            return { ...c, score };
+        }).sort((a, b) => b.score - a.score);
+
+        return scored[0]?.addr || 'localhost';
+    }
+
+    private findBrainFile(filename: string): string | null {
+        const brainDir = path.join(os.homedir(), '.gemini', 'antigravity', 'brain');
+        if (!fs.existsSync(brainDir)) return null;
+        try {
+            const entries = fs.readdirSync(brainDir, { withFileTypes: true })
+                .filter(e => e.isDirectory())
+                .map(e => {
+                    const full = path.join(brainDir, e.name);
+                    try { return { full, mtime: fs.statSync(full).mtimeMs }; } catch { return { full, mtime: 0 }; }
+                })
+                .sort((a, b) => b.mtime - a.mtime);
+            for (const entry of entries) {
+                const filePath = path.join(entry.full, filename);
+                if (fs.existsSync(filePath)) return filePath;
+            }
+        } catch { }
+        return null;
+    }
+
     private configureRoutes() {
         const router = Router();
 
@@ -249,6 +497,50 @@ export class AntigravityServer {
             res.json(this.state.lastSnapshot);
         });
 
+        router.get('/task', (_req, res) => {
+            const brainDir = path.join(os.homedir(), '.gemini', 'antigravity', 'brain');
+            const filePath = this.findBrainFile('task.md.resolved');
+            if (!filePath) return res.status(404).json({ error: 'Task file not found', searched: brainDir });
+            try {
+                const content = fs.readFileSync(filePath, 'utf8');
+                res.json({ content, path: filePath });
+            } catch (e) {
+                res.status(500).json({ error: (e as Error).message });
+            }
+        });
+
+        router.get('/walkthrough', (_req, res) => {
+            const brainDir = path.join(os.homedir(), '.gemini', 'antigravity', 'brain');
+            const filePath = this.findBrainFile('walkthrough.md.resolved');
+            if (!filePath) return res.status(404).json({ error: 'Walkthrough file not found', searched: brainDir });
+            try {
+                const content = fs.readFileSync(filePath, 'utf8');
+                res.json({ content, path: filePath });
+            } catch (e) {
+                res.status(500).json({ error: (e as Error).message });
+            }
+        });
+
+        router.get('/plan', (_req, res) => {
+            const brainDir = path.join(os.homedir(), '.gemini', 'antigravity', 'brain');
+            const candidates = [
+                'implementation_plan.md.resolved', 'plan.md.resolved',
+                'implementation_plan.md', 'plan.md'
+            ];
+            for (const name of candidates) {
+                const filePath = this.findBrainFile(name);
+                if (filePath) {
+                    try {
+                        const content = fs.readFileSync(filePath, 'utf8');
+                        return res.json({ content, path: filePath });
+                    } catch (e) {
+                        return res.status(500).json({ error: (e as Error).message });
+                    }
+                }
+            }
+            res.status(404).json({ error: 'Plan file not found', searched: brainDir });
+        });
+
         router.get('/instances', async (_req, res) => {
             try {
                 const instances = await discoverInstances();
@@ -266,7 +558,7 @@ export class AntigravityServer {
             const { targetId } = req.body as { targetId: string };
             if (!targetId) return res.status(400).json({ error: 'targetId required' });
             try {
-                if (this.state.activeTargetId !== targetId) {
+                if (this.state.activeTargetId !== targetId || !this.state.lastSnapshot) {
                     await this.initCDP(targetId);
                 } else if (this.state.lastSnapshot) {
                     this.broadcastSnapshot(this.state.lastSnapshot);
@@ -362,6 +654,30 @@ export class AntigravityServer {
             } catch (e) {
                 res.status(500).json({ error: (e as Error).message });
             }
+        });
+
+        router.get('/debug/snapshot-meta', (_req, res) => {
+            const snapshot = this.state.lastSnapshot;
+            if (!snapshot) {
+                return res.status(503).json({
+                    error: 'No snapshot available yet',
+                    activeTargetId: this.state.activeTargetId,
+                    activePort: this.state.activePort
+                });
+            }
+
+            const controlsMeta: any = (snapshot as any).controlsMeta || null;
+            const surfaceSignals: any = (snapshot as any).surfaceSignals || null;
+            const html = String(snapshot.html || '');
+            res.json({
+                activeTargetId: this.state.activeTargetId,
+                activePort: this.state.activePort,
+                usable: this.isSnapshotUsable(snapshot),
+                htmlLength: html.length,
+                hasCascadeInHtml: /id\s*=\s*["'](?:cascade|conversation|chat)["']/i.test(html),
+                controlsMeta,
+                surfaceSignals
+            });
         });
 
         // Debug: probe file inputs
@@ -513,22 +829,7 @@ export class AntigravityServer {
 
                 this.server.listen(this.port, async () => {
                     const interfaces = os.networkInterfaces();
-                    let localIp = 'localhost';
-                    const candidates: { name: string; addr: string }[] = [];
-                    for (const name of Object.keys(interfaces)) {
-                        for (const iface of interfaces[name] || []) {
-                            if (!iface.internal && iface.family === 'IPv4') {
-                                candidates.push({ name, addr: iface.address });
-                            }
-                        }
-                    }
-                    const priorityMatch = candidates.find(c =>
-                        /wi-fi|ethernet|wireless|en[0-9]|eth[0-9]/i.test(c.name)
-                    );
-                    const cleanIp = priorityMatch || candidates.find(c =>
-                        !/virtual|vbox|wsl|vpn|tailscale/i.test(c.name)
-                    ) || candidates[0];
-                    if (cleanIp) localIp = cleanIp.addr;
+                    const localIp = this.pickBestLocalIp(interfaces);
 
                     const protocol = this.useHttps ? 'https' : 'http';
                     const authQuery = this.useAuth ? `?token=${this.authToken}` : '';
@@ -558,8 +859,12 @@ export class AntigravityServer {
 
     public stop() {
         if (this.state.pollInterval) clearInterval(this.state.pollInterval);
+        this.state.pollInterval = null;
         this.wss?.close();
         this.server?.close();
         this.state.cdpConnections.forEach(c => c.ws.close());
+        this.state.cdpConnections = [];
+        this.state.activeTargetId = null;
+        this.state.activePort = null;
     }
 }

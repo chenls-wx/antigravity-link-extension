@@ -3,7 +3,7 @@
     "displayName": "Antigravity Link",
     "description": "Mobile upload and voice-to-text bridge for Antigravity",
     "icon": "icon.png",
-    "version": "1.0.11",
+    "version": "1.0.12",
     "license": "MIT",
     "engines": {
         "vscode": "^1.90.0"
@@ -56,6 +56,21 @@
                     "type": "boolean",
                     "default": true,
                     "description": "Serve the mobile bridge over HTTPS with a self-signed certificate"
+                },
+                "antigravityLink.preferredHost": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional IPv4 LAN host to advertise in QR/URL (example: 192.168.1.101)"
+                },
+                "antigravityLink.strictWorkbenchOnly": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Only consider workbench.html CDP targets (recommended for stability)"
+                },
+                "antigravityLink.includeFallbackTargets": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Allow non-workbench fallback targets (jetski/launchpad) when strict mode is disabled"
                 }
             }
         }
