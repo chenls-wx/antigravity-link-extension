@@ -60,7 +60,7 @@
                 "antigravityLink.preferredHost": {
                     "type": "string",
                     "default": "",
-                    "description": "Optional host or host:port to advertise in QR/URL (examples: 192.168.1.101, 10.0.0.8:3000, remote.example.com:8443)"
+                    "description": "Optional IPv4 LAN host to advertise in QR/URL (example: 192.168.1.101)"
                 },
                 "antigravityLink.strictWorkbenchOnly": {
                     "type": "boolean",
@@ -82,7 +82,7 @@
         "typecheck": "tsc -p ./ --noEmit",
         "bundle": "node ./esbuild.js",
         "package": "vsce package",
-        "test": "mocha -r ts-node/register src/test/injectFile.test.ts src/test/injectMessage.test.ts src/test/advertisedEndpoint.test.ts"
+        "test": "mocha -r ts-node/register src/test/injectFile.test.ts src/test/injectMessage.test.ts"
     },
     "devDependencies": {
         "@types/chai": "^5.2.3",
