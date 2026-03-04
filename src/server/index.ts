@@ -433,8 +433,6 @@ export class AntigravityServer {
     }
 
     private pickBestLocalIp(interfaces: NodeJS.Dict<os.NetworkInterfaceInfo[]>): string {
-        if (this.preferredHost && this.isPrivateIPv4(this.preferredHost)) return this.preferredHost;
-
         const candidates: { name: string; addr: string }[] = [];
         for (const name of Object.keys(interfaces)) {
             for (const iface of interfaces[name] || []) {
@@ -457,6 +455,21 @@ export class AntigravityServer {
         }).sort((a, b) => b.score - a.score);
 
         return scored[0]?.addr || 'localhost';
+    }
+
+    private parsePreferredEndpoint(): { host: string; port?: number } | null {
+        if (!this.preferredHost) return null;
+        try {
+            const parsed = new URL(this.preferredHost.includes('://') ? this.preferredHost : `http://${this.preferredHost}`);
+            if (!parsed.hostname) return null;
+            const preferredPort = parsed.port ? Number(parsed.port) : undefined;
+            if (preferredPort && (Number.isNaN(preferredPort) || preferredPort < 1 || preferredPort > 65535)) {
+                return { host: parsed.hostname };
+            }
+            return { host: parsed.hostname, port: preferredPort };
+        } catch {
+            return null;
+        }
     }
 
     private findBrainFile(filename: string): string | null {
@@ -829,12 +842,14 @@ export class AntigravityServer {
 
                 this.server.listen(this.port, async () => {
                     const interfaces = os.networkInterfaces();
-                    const localIp = this.pickBestLocalIp(interfaces);
+                    const preferredEndpoint = this.parsePreferredEndpoint();
+                    const localIp = preferredEndpoint?.host || this.pickBestLocalIp(interfaces);
+                    const advertisedPort = preferredEndpoint?.port || this.port;
 
                     const protocol = this.useHttps ? 'https' : 'http';
                     const authQuery = this.useAuth ? `?token=${this.authToken}` : '';
 
-                    this._localUrl = `${protocol}://${localIp}:${this.port}/${authQuery}`;
+                    this._localUrl = `${protocol}://${localIp}:${advertisedPort}/${authQuery}`;
                     this._secureUrl = this.useHttps ? this._localUrl : '';
 
                     try {
