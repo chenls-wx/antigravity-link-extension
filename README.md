@@ -68,7 +68,7 @@ Replace `<username>` with your Windows username. Multiple Antigravity sessions a
 | `antigravityLink.port` | `3000` | Port for the local bridge server. |
 | `antigravityLink.autoStart` | `false` | Start the server on VS Code launch. |
 | `antigravityLink.useHttps` | `true` | Serve over HTTPS for mic access. |
-| `antigravityLink.preferredHost` | `""` | Optional LAN IPv4 to advertise in QR URL (example: `192.168.1.101`). |
+| `antigravityLink.preferredHost` | `""` | Optional advertised host or `host:port` for QR URL (examples: `192.168.1.101`, `203.0.113.10:3000`, `remote.example.com:8443`). |
 | `antigravityLink.strictWorkbenchOnly` | `true` | Only bind to `workbench.html` CDP targets for stability. |
 | `antigravityLink.includeFallbackTargets` | `false` | Allow jetski/launchpad fallback targets when strict mode is disabled. |
 
@@ -104,6 +104,9 @@ Use the exact launch command shown in the Quick start section. Any Antigravity w
 
 2) **Can I run multiple sessions?**
 Yes. Multiple Antigravity windows are supported as long as each one is launched with the command shown above.
+
+3) **Can I use this with VS Code Remote SSH?**
+Yes. If your phone can directly reach the remote host, set `antigravityLink.preferredHost` to the remote address (supports `host` or `host:port`) so the QR code shows that remote endpoint directly. If direct access is not possible, forward the remote port (VS Code Ports or SSH `-L`) and set `antigravityLink.preferredHost` to a phone-reachable forwarded address.
 
 ## Contributing
 
