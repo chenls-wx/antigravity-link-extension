@@ -105,6 +105,9 @@ Use the exact launch command shown in the Quick start section. Any Antigravity w
 2) **Can I run multiple sessions?**
 Yes. Multiple Antigravity windows are supported as long as each one is launched with the command shown above.
 
+3) **Can I use this with VS Code Remote SSH?**
+Yes, but you must expose the bridge port from the remote host to your local machine first (for example using VS Code "Ports" forwarding or SSH `-L` forwarding). Then set `antigravityLink.preferredHost` to your local machine LAN IP so the QR code points to an address your phone can reach.
+
 ## Contributing
 
 We are accepting pull requests and actively looking for contributors. If you want to help, check the TODOs in the codebase or open an issue to discuss ideas.
