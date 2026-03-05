@@ -128,6 +128,7 @@ After packaging, the `.vsix` file will be generated in the repository root.
 ### GitHub Release package
 
 This repository includes a GitHub Actions workflow that automatically builds and uploads a `.vsix` file when a GitHub Release is published.
+Yes — once a Release is published, the generated `.vsix` is automatically uploaded to that Release's assets.
 
 1. Update `package.json` version and `CHANGELOG.md`.
 2. Push the commit.
