@@ -113,6 +113,27 @@ Yes. If your phone can directly reach the remote host, set `antigravityLink.pref
 We are accepting pull requests and actively looking for contributors. If you want to help, check the TODOs in the codebase or open an issue to discuss ideas.
 See `CONTRIBUTING.md` for setup and PR notes.
 
+## Release VSIX
+
+### Local package
+
+```bash
+npm install
+npm run vscode:prepublish
+npm run package
+```
+
+After packaging, the `.vsix` file will be generated in the repository root.
+
+### GitHub Release package
+
+This repository includes a GitHub Actions workflow that automatically builds and uploads a `.vsix` file when a GitHub Release is published.
+
+1. Update `package.json` version and `CHANGELOG.md`.
+2. Push the commit.
+3. Create and publish a GitHub Release (tag format example: `v1.0.13`).
+4. Download the generated `.vsix` from the Release assets.
+
 ## License
 
 MIT. See `LICENSE`.
