@@ -593,6 +593,7 @@
         let authToken = localStorage.getItem('ag_auth_token') || '';
         const sendBtnOriginalIcon = sendBtn.innerHTML;
         let suppressReconnectOnce = false;
+        let hasLoggedFirstSnapshot = false;
         let mirrorHost = null;
         let mirrorRoot = null;
         let mirrorStyleSignature = '';
@@ -1264,43 +1265,71 @@
                 clearTimeout(watchdog);
                 logToScreen('WebSocket Connected', '#4ade80');
                 updateConnectionUI('ws');
+                hasLoggedFirstSnapshot = false;
 
                 const loader = document.querySelector('.loading span');
                 if (loader) loader.textContent = 'Authenticating...';
+                logToScreen('Authenticating with /instances and requesting initial snapshot...', '#999');
 
                 // Auto-connect / Wake-up Logic
                 try {
                     const res = await fetch('/instances', { headers: { 'Authorization': `Bearer ${authToken}` } });
+                    if (res.status === 401) {
+                        logToScreen('Authentication failed for /instances (401)', '#f87171');
+                        authToken = '';
+                        localStorage.removeItem('ag_auth_token');
+                        showLogin();
+                        return;
+                    }
                     if (res.ok) {
                         const data = await res.json();
+                        logToScreen(`Initial /instances response: activePort=${data.activePort || 'none'}, total=${(data.instances || []).length}`, '#999');
                         if (!data.activePort && data.instances.length > 0) {
                             if (loader) loader.textContent = 'Auto-connecting...';
                             await switchInstance(data.instances[0].id);
                             return;
                         }
+                        if (!data.activePort && data.instances.length === 0 && loader) {
+                            loader.textContent = 'No active instances found. Check debug logs.';
+                        }
+                    } else {
+                        logToScreen(`Initial /instances request failed with status ${res.status}`, '#f87171');
                     }
                 } catch (e) {
                     logToScreen(`Auto-connect check failed: ${e.message}`);
                 }
 
                 ws.send(JSON.stringify({ type: 'request_snapshot' }));
+                logToScreen('Snapshot requested via WebSocket', '#999');
 
                 // If no snapshot arrives quickly, surface actionable state instead of hanging on "Authenticating..."
                 setTimeout(() => {
                     const loadingEl = document.querySelector('.loading span');
-                    if (loadingEl && /authenticating/i.test(loadingEl.textContent || '')) {
+                    if (loadingEl && /authenticating|auto-connecting/i.test(loadingEl.textContent || '')) {
                         loadingEl.textContent = 'Connected. Waiting for chat surface...';
+                        logToScreen('Still waiting for first snapshot after 5s', '#fbbf24');
                     }
                 }, 5000);
 
                 // Recovery path: try pulling snapshot/instances if UI still stalled.
                 setTimeout(recoverIfStalled, 6500);
+                setTimeout(() => {
+                    const loadingEl = document.querySelector('.loading span');
+                    if (loadingEl && /authenticating|auto-connecting|waiting for chat surface/i.test(loadingEl.textContent || '')) {
+                        loadingEl.textContent = 'Still waiting for snapshot. Open 🖥️ Active Instances to inspect targets.';
+                        logToScreen('No snapshot received after 12s', '#f87171');
+                    }
+                }, 12000);
             };
 
             ws.onmessage = (event) => {
                 try {
                     const msg = JSON.parse(event.data);
                     if (msg.type === 'snapshot' && msg.data) {
+                        if (!hasLoggedFirstSnapshot) {
+                            logToScreen('Snapshot received', '#4ade80');
+                            hasLoggedFirstSnapshot = true;
+                        }
                         lastSnapshotData = msg.data;
                         if (!userIsScrolling) {
                             renderSnapshot(msg.data);
@@ -1513,6 +1542,7 @@
                      <div class="spinner"></div>
                 </div>
             `;
+            logToScreen('Loading active instances...', '#999');
 
             try {
                 const res = await fetch('/instances', {
@@ -1527,14 +1557,17 @@
 
                 const data = await res.json();
                 activeTargetId = data.activeTargetId || null;
+                logToScreen(`Instances loaded: ${(data.instances || []).length}, activeTargetId=${activeTargetId || 'none'}`, '#999');
                 renderInstances(data.instances || []);
             } catch (e) {
+                logToScreen(`Failed to load instances: ${e.message}`, '#f87171');
                 instancesList.innerHTML = `<div style="color:#ff6b6b;text-align:center;">Failed to load instances</div>`;
             }
         }
 
         function renderInstances(instances) {
             if (instances.length === 0) {
+                logToScreen('No instances found from /instances endpoint', '#fbbf24');
                 instancesList.innerHTML = `<div style="text-align:center;color:#666;">No instances found</div>`;
                 return;
             }

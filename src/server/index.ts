@@ -264,6 +264,7 @@ export class AntigravityServer {
 
     private async initCDP(targetId?: string): Promise<void> {
         const instances = await discoverInstances();
+        console.log(`[TRACE] cdp.init discovered=${instances.length} targetId=${targetId || 'auto'}`);
 
         // Select target by id if provided, else best-scoring chat target, else best overall
         let chosen = targetId ? instances.find(i => i.id === targetId) : null;
@@ -295,7 +296,10 @@ export class AntigravityServer {
 
         const prioritized = [...instances].sort((a, b) => this.scoreTarget(b) - this.scoreTarget(a));
         const candidates = chosen ? [chosen, ...prioritized.filter(t => t.id !== chosen!.id)] : prioritized;
-        if (candidates.length === 0) return;
+        if (candidates.length === 0) {
+            console.log('[TRACE] cdp.init no_candidates_after_discovery');
+            return;
+        }
 
         let selectedConn: CDPConnection | null = null;
         let selectedTarget: CDPInfo | null = null;
@@ -558,12 +562,14 @@ export class AntigravityServer {
         router.get('/instances', async (_req, res) => {
             try {
                 const instances = await discoverInstances();
+                console.log(`[TRACE] api.instances activeTargetId=${this.state.activeTargetId || 'none'} activePort=${this.state.activePort || 'none'} count=${instances.length}`);
                 res.json({
                     activeTargetId: this.state.activeTargetId,
                     activePort: this.state.activePort,
                     instances: instances.map(i => ({ id: i.id, port: i.port, url: i.url, title: i.title }))
                 });
             } catch (e) {
+                console.log('[TRACE] api.instances error:', (e as Error).message);
                 res.status(500).json({ error: (e as Error).message });
             }
         });
