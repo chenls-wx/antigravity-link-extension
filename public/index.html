@@ -1220,11 +1220,14 @@
             updateConnectionUI('connecting');
 
             ws = new WebSocket(wsUrl);
+            let stalledRecoveryAttempts = 0;
+            const maxStalledRecoveryAttempts = 8;
+            const stalledRecoveryDelayMs = 1500;
 
             async function recoverIfStalled() {
                 try {
                     const loader = document.querySelector('.loading span');
-                    const isStalled = !!loader && /authenticating|waiting for chat surface/i.test(loader.textContent || '');
+                    const isStalled = !!loader && /authenticating|waiting for chat surface|no active instances found/i.test(loader.textContent || '');
                     if (!isStalled) return;
 
                     const snapshotRes = await fetch('/snapshot', {
@@ -1246,6 +1249,13 @@
                     const fallbackTargetId = data.activeTargetId || (Array.isArray(data.instances) && data.instances[0] ? data.instances[0].id : '');
                     if (fallbackTargetId) {
                         await switchInstance(fallbackTargetId);
+                        return;
+                    }
+
+                    if (stalledRecoveryAttempts < maxStalledRecoveryAttempts) {
+                        stalledRecoveryAttempts += 1;
+                        if (loader) loader.textContent = `No active instances found yet. Retrying... (${stalledRecoveryAttempts}/${maxStalledRecoveryAttempts})`;
+                        setTimeout(recoverIfStalled, stalledRecoveryDelayMs);
                     }
                 } catch (e) {
                     logToScreen(`Recover check failed: ${e.message}`, '#f87171');
@@ -1290,7 +1300,9 @@
                             return;
                         }
                         if (!data.activePort && data.instances.length === 0 && loader) {
-                            loader.textContent = 'No active instances found. Check debug logs.';
+                            loader.textContent = 'No active instances found yet. Retrying...';
+                            stalledRecoveryAttempts = 0;
+                            setTimeout(recoverIfStalled, stalledRecoveryDelayMs);
                         }
                     } else {
                         logToScreen(`Initial /instances request failed with status ${res.status}`, '#f87171');
