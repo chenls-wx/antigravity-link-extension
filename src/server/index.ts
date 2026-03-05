@@ -563,6 +563,9 @@ export class AntigravityServer {
             try {
                 const instances = await discoverInstances();
                 console.log(`[TRACE] api.instances activeTargetId=${this.state.activeTargetId || 'none'} activePort=${this.state.activePort || 'none'} count=${instances.length}`);
+                if (instances.length === 0) {
+                    console.log(`[TRACE] api.instances empty_discovery cdpConnections=${this.state.cdpConnections.length} wsClients=${this.wss?.clients.size || 0} lastSnapshot=${!!this.state.lastSnapshot}`);
+                }
                 res.json({
                     activeTargetId: this.state.activeTargetId,
                     activePort: this.state.activePort,
@@ -832,6 +835,7 @@ export class AntigravityServer {
                             return;
                         }
                     }
+                    console.log(`[TRACE] ws.connected cdpReady=${this.state.cdpConnections.length > 0} lastSnapshot=${!!this.state.lastSnapshot} clients=${this.wss?.clients.size || 0}`);
                     if (this.state.lastSnapshot) {
                         ws.send(JSON.stringify({ type: 'snapshot', data: this.state.lastSnapshot, timestamp: new Date().toISOString() }));
                     }
@@ -840,6 +844,8 @@ export class AntigravityServer {
                             const msg = JSON.parse(data.toString());
                             if (msg.type === 'request_snapshot' && this.state.lastSnapshot) {
                                 ws.send(JSON.stringify({ type: 'snapshot', data: this.state.lastSnapshot, timestamp: new Date().toISOString() }));
+                            } else if (msg.type === 'request_snapshot') {
+                                console.log(`[TRACE] ws.request_snapshot_empty cdpReady=${this.state.cdpConnections.length > 0} missedSnapshots=${this.state.missedSnapshots}`);
                             }
                         } catch { }
                     });

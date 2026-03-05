@@ -1220,11 +1220,23 @@
             updateConnectionUI('connecting');
 
             ws = new WebSocket(wsUrl);
+            let stalledRecoveryAttempts = 0;
+            const maxStalledRecoveryAttempts = 8;
+            const stalledRecoveryDelayMs = 1500;
+            let stalledRecoveryTimer = null;
+
+            const scheduleStalledRecovery = (delayMs = stalledRecoveryDelayMs) => {
+                if (stalledRecoveryTimer) clearTimeout(stalledRecoveryTimer);
+                stalledRecoveryTimer = setTimeout(() => {
+                    stalledRecoveryTimer = null;
+                    recoverIfStalled();
+                }, delayMs);
+            };
 
             async function recoverIfStalled() {
                 try {
                     const loader = document.querySelector('.loading span');
-                    const isStalled = !!loader && /authenticating|waiting for chat surface/i.test(loader.textContent || '');
+                    const isStalled = !!loader && /authenticating|waiting for chat surface|no active instances found/i.test(loader.textContent || '');
                     if (!isStalled) return;
 
                     const snapshotRes = await fetch('/snapshot', {
@@ -1235,6 +1247,9 @@
                         lastSnapshotData = data;
                         renderSnapshot(data);
                         updateControls(data);
+                        stalledRecoveryAttempts = 0;
+                        if (stalledRecoveryTimer) clearTimeout(stalledRecoveryTimer);
+                        stalledRecoveryTimer = null;
                         return;
                     }
 
@@ -1245,7 +1260,19 @@
                     const data = await instancesRes.json();
                     const fallbackTargetId = data.activeTargetId || (Array.isArray(data.instances) && data.instances[0] ? data.instances[0].id : '');
                     if (fallbackTargetId) {
+                        stalledRecoveryAttempts = 0;
+                        if (stalledRecoveryTimer) clearTimeout(stalledRecoveryTimer);
+                        stalledRecoveryTimer = null;
                         await switchInstance(fallbackTargetId);
+                        return;
+                    }
+
+                    if (stalledRecoveryAttempts < maxStalledRecoveryAttempts) {
+                        stalledRecoveryAttempts += 1;
+                        if (loader) loader.textContent = `No active instances found yet. Retrying... (${stalledRecoveryAttempts}/${maxStalledRecoveryAttempts})`;
+                        scheduleStalledRecovery();
+                    } else if (loader) {
+                        loader.textContent = 'No active instances found. Open 🖥️ Active Instances and check debug logs.';
                     }
                 } catch (e) {
                     logToScreen(`Recover check failed: ${e.message}`, '#f87171');
@@ -1266,6 +1293,9 @@
                 logToScreen('WebSocket Connected', '#4ade80');
                 updateConnectionUI('ws');
                 hasLoggedFirstSnapshot = false;
+                stalledRecoveryAttempts = 0;
+                if (stalledRecoveryTimer) clearTimeout(stalledRecoveryTimer);
+                stalledRecoveryTimer = null;
 
                 const loader = document.querySelector('.loading span');
                 if (loader) loader.textContent = 'Authenticating...';
@@ -1290,7 +1320,9 @@
                             return;
                         }
                         if (!data.activePort && data.instances.length === 0 && loader) {
-                            loader.textContent = 'No active instances found. Check debug logs.';
+                            stalledRecoveryAttempts = 0;
+                            loader.textContent = 'No active instances found yet. Starting retries...';
+                            scheduleStalledRecovery();
                         }
                     } else {
                         logToScreen(`Initial /instances request failed with status ${res.status}`, '#f87171');
@@ -1345,6 +1377,8 @@
 
             ws.onclose = (event) => {
                 clearTimeout(watchdog);
+                if (stalledRecoveryTimer) clearTimeout(stalledRecoveryTimer);
+                stalledRecoveryTimer = null;
                 const reason = event.code === 1008 ? 'Auth Failed' : (event.code === 1006 ? 'Abnormal Closure' : `Closed (${event.code})`);
                 logToScreen(`WS Disconnected: ${reason}`);
 
